@@ -51,6 +51,15 @@ class RobotSpec:
     """MuJoCo-Warp constraint / contact capacity per world."""
     mirror_sign: tuple[float, ...] | None = None
     """Sign of each joint under the left-right mirror (joint_names order); None: flip roll and yaw joints (G1 axes)."""
+    mirror_permutation: tuple[int, ...] | None = None
+    feet: tuple[str, str] = ("left_ankle_roll_link", "right_ankle_roll_link")
+    contact_height: float = 0.045
+    flat_foot_height: float = 0.033
+    sparse_bodies: tuple[str, ...] | None = None
+    """Head/torso, left wrist, right wrist, left ankle, right ankle for sparse5."""
+    load_motion_archive: Callable[[str], list[tuple[str, MotionArrays]]] | None = None
+    control_files: tuple[str, ...] = ()
+    """Assets hashed in the control snapshot; empty keeps legacy checkpoint compatibility."""
 
     @property
     def num_joints(self) -> int:

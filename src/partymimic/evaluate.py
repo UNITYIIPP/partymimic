@@ -21,12 +21,14 @@ import sys
 import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--robot", type=str, default="g1", help="robot package under partymimic/ (g1)")
+parser.add_argument("--robot", type=str, default=None, help="default: checkpoint/run robot")
 parser.add_argument("--run_dir", type=str, required=True)
 parser.add_argument("--watch", action="store_true")
 parser.add_argument("--ckpt", type=str, default=None, help="evaluate one checkpoint")
 parser.add_argument("--record", type=str, default=None, help="save trajectories (npz) for rendering")
-parser.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
+motion_source = parser.add_mutually_exclusive_group()
+motion_source.add_argument("--motion_file", type=str, default=None, help="packed motion archive")
+motion_source.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
 parser.add_argument("--every", type=int, default=1, help="evaluate every n-th checkpoint")
 parser.add_argument("--dr_from", type=str, default=None, help="evaluate under this robot's training randomization ('self': own)")
 parser.add_argument("--dr_parts", type=str, default="all", choices=["all", "dynamics", "sensing"],
@@ -50,6 +52,7 @@ from partymimic.mdp import MAX_STEP_REWARD, MDP
 from partymimic.motion import MotionLib
 from partymimic.networks import Policy, policy_kwargs
 from partymimic.robot import RobotSpec, get_robot
+from partymimic.control import control_snapshot, validate_control
 
 
 def transfer_dr(target: RobotSpec, source: RobotSpec, parts: str = "all") -> RobotSpec:
@@ -78,15 +81,19 @@ def transfer_dr(target: RobotSpec, source: RobotSpec, parts: str = "all") -> Rob
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.manual_seed(args.seed)
 dev = "cuda:0"
-robot = get_robot(args.robot)
+_args_json = os.path.join(os.path.dirname(args.ckpt) if args.ckpt else args.run_dir, "args.json")
+_run_args = (torch.load(args.ckpt, map_location="cpu", weights_only=False)["args"] if args.ckpt else
+             json.load(open(_args_json)) if os.path.exists(_args_json) else {})
+robot = get_robot(args.robot or _run_args.get("robot", "g1"))
+ROBOT_CONTROL = control_snapshot(robot)
 if args.dr_from:
     robot = transfer_dr(robot, robot if args.dr_from == "self" else get_robot(args.dr_from), args.dr_parts)
     print("pd_gain_scale on this robot:", robot.dr.pd_gain_scale)
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
-_args_json = os.path.join(os.path.dirname(args.ckpt) if args.ckpt else args.run_dir, "args.json")
-motion.set_interface(json.load(open(_args_json)).get("interface", "joint") if os.path.exists(_args_json) else "joint",
-                     robot.tracked_bodies)
+source = ({"motion_dir": args.motion_dir, "motion_file": args.motion_file} if args.motion_dir or args.motion_file else
+          {"motion_dir": _run_args.get("motion_dir"), "motion_file": _run_args.get("motion_file")})
+motion = MotionLib.from_source(robot, kin, dev, **source)
+motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 N = C * args.repeats
@@ -95,6 +102,7 @@ clip_of = torch.arange(N, device=dev) % C
 
 @torch.no_grad()
 def evaluate(env: TrackingSim, ck: dict, record: str | None = None) -> dict:
+    validate_control(ck, ROBOT_CONTROL)
     a_ = ck["args"]
     K, Hh = a_["goal_frames"], a_["hist"]
     assert a_.get("interface", "joint") == motion.interface, "checkpoint and the run's args.json differ in --interface"

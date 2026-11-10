@@ -32,13 +32,15 @@ from partymimic.mdp import MAX_STEP_REWARD, MDP
 from partymimic.motion import MotionLib
 from partymimic.networks import Policy, check_pruned, policy_kwargs
 from partymimic.robot import get_robot
+from partymimic.control import control_snapshot, validate_control
 
 torch.backends.cuda.matmul.allow_tf32 = True
 dev = "cuda:0"
 _run_args = json.load(open(os.path.join(args.run_dir, "args.json"))) if os.path.exists(os.path.join(args.run_dir, "args.json")) else {}
 robot = get_robot(args.robot or _run_args.get("robot", "g1"))
+ROBOT_CONTROL = control_snapshot(robot)
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(_run_args.get("motion_dir") or robot.motion_dir, robot, kin, dev)  # the run's own motion set
+motion = MotionLib.from_source(robot, kin, dev, motion_dir=_run_args.get("motion_dir"), motion_file=_run_args.get("motion_file"))  # the run's own motion set
 motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
 check_pruned(_run_args, nets_only=True, what=args.run_dir)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
@@ -46,6 +48,7 @@ C = len(motion.names)
 
 
 def load_policy(ck):
+    validate_control(ck, ROBOT_CONTROL)
     a_ = ck["args"]
     widths = lambda key: tuple(int(x) for x in a_.get(key, "2048,1024,512,256").split(","))  # noqa: E731
     pi = Policy(mdp.obs_dim, motion.goal_dim(a_["goal_frames"]), robot.num_joints, hist=a_["hist"],

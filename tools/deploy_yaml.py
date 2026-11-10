@@ -69,7 +69,7 @@ def build_blink_robot(model_file: str, future: int, spec) -> dict:
                                 if any(re.fullmatch(p, j) for p in a.target_names_expr))
     root = spec.tracked_bodies[0]
     steps = list(range(-1, future + 1))
-    return {
+    cfg = {
         "model_path": model_file,
         "joint_names_simulation": joints,
         "body_names_simulation": [m.body(i).name for i in range(1, m.nbody)],
@@ -93,6 +93,11 @@ def build_blink_robot(model_file: str, future: int, spec) -> dict:
             "ref_root": {"ref_root": {"_target_": "supermimic.ref_anchor", "future_steps": steps}},
         },
     }
+
+    if spec.control_files:
+        from partymimic.control import control_snapshot
+        cfg["robot_control"] = control_snapshot(spec)
+    return cfg
 
 
 def build_sparse5(model_file: str, window: int, spec, kp_names: list[str], offsets: list[int], err_dim: int) -> dict:

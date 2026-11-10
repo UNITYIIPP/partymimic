@@ -42,15 +42,31 @@ def sparse5_bodies(tracked: tuple[str, ...]) -> list[int]:
 
 class MotionLib:
     def __init__(self, files: list[str], kin: Kinematics, device: str, load_motion: Callable[[str], MotionArrays]):
+        self._build(((os.path.splitext(os.path.basename(f))[0], load_motion(f)) for f in files), kin, device)
+
+    @classmethod
+    def from_clips(cls, clips, kin: Kinematics, device: str) -> MotionLib:
+        obj = cls.__new__(cls)
+        obj._build(clips, kin, device)
+        return obj
+
+    def _build(self, clips, kin: Kinematics, device: str):
         self.device = device
-        self.names = [os.path.splitext(os.path.basename(f))[0] for f in files]
+        self.names = []
+        self.sparse_bodies = kin.robot.sparse_bodies
         ps, qs, js = [], [], []
         lens = []
-        for f in files:
-            p, quat, j, src_fps = load_motion(f)
+        for name, (p, quat, j, src_fps) in clips:
+            self.names.append(name)
+            if len(p) < 2 or not np.isfinite(src_fps) or src_fps <= 0:
+                raise ValueError(f'{name}: need at least two frames and a positive fps')
             p, quat, j = (torch.tensor(x, dtype=torch.float32) for x in (p, quat, j))
             # resample to 50 Hz
             T_src = p.shape[0]
+            if abs(src_fps - 1 / CONTROL_DT) < 1e-9:
+                ps.append(p), qs.append(quat), js.append(j)
+                lens.append(T_src)
+                continue
             dur = (T_src - 1) / src_fps
             n = int(np.floor(dur / CONTROL_DT)) + 1
             t = torch.arange(n, dtype=torch.float32) * CONTROL_DT * src_fps
@@ -61,6 +77,8 @@ class MotionLib:
             quat = quat_slerp(quat[i0], quat[i0 + 1], a)
             ps.append(p), qs.append(quat), js.append(j)
             lens.append(n)
+        if not lens:
+            raise ValueError('No motion clips found')
         self.clip_len = torch.tensor(lens, device=device)
         self.clip_start = torch.cumsum(torch.cat((torch.zeros(1, dtype=torch.long), torch.tensor(lens[:-1], dtype=torch.long))), 0).to(device)  # dtype: one clip gives an empty (float) tensor
         self.clip_end = self.clip_start + self.clip_len - 1  # last valid frame (inclusive)
@@ -137,11 +155,37 @@ class MotionLib:
         return torch.cdist(x, c).argmin(1)
 
     @staticmethod
-    def from_dir(path: str, robot: RobotSpec, kin: Kinematics, device: str) -> MotionLib:
+    def from_source(robot: RobotSpec, kin: Kinematics, device: str, *, motion_dir: str | None = None,
+                    motion_file: str | None = None, max_clips: int | None = None) -> MotionLib:
+        if motion_file and motion_dir:
+            raise ValueError('Choose motion_file or motion_dir, not both')
+        if motion_file:
+            if robot.load_motion_archive is None:
+                raise ValueError(f'{robot.name} does not support packed motion archives')
+            clips = robot.load_motion_archive(motion_file)
+            return MotionLib.from_clips(clips[:max_clips], kin, device)
+        path = motion_dir or robot.motion_dir
         files = sorted(glob.glob(os.path.join(path, robot.motion_glob)))
-        if not files:  # humanoid_s0 motion library: npz clips of world body states, pelvis first
-            return MotionLib(sorted(glob.glob(os.path.join(path, "*.npz"))), kin, device, load_npz)
-        return MotionLib(files, kin, device, robot.load_motion)
+        loader = robot.load_motion
+        if not files:
+            files, loader = sorted(glob.glob(os.path.join(path, '*.npz'))), load_npz
+        return MotionLib(files[:max_clips], kin, device, loader)
+
+    @staticmethod
+    def from_single(path: str, robot: RobotSpec, kin: Kinematics, device: str,
+                    clip: str | None = None) -> MotionLib:
+        if clip is None:
+            return MotionLib([path], kin, device, robot.load_motion)
+        if robot.load_motion_archive is None:
+            raise ValueError(f'{robot.name} does not support selecting clips from archives')
+        clips = [(n, a) for n, a in robot.load_motion_archive(path) if n == clip]
+        if not clips:
+            raise ValueError(f'{path}: no clip named {clip!r}')
+        return MotionLib.from_clips(clips, kin, device)
+
+    @staticmethod
+    def from_dir(path: str, robot: RobotSpec, kin: Kinematics, device: str) -> MotionLib:
+        return MotionLib.from_source(robot, kin, device, motion_dir=path)
 
     def set_ref_contact(self, feet: list[int], margin: float = 0.015, vmax: float = 0.5, q: float = 0.05) -> None:
         """Speed-branch reference foot contact (num_frames, len(feet)): height below the clip's own floor (the
@@ -162,7 +206,8 @@ class MotionLib:
         assert interface in INTERFACES, interface
         self.interface = interface
         if interface == "sparse5":
-            self.kp = sparse5_bodies(tuple(tracked))
+            self.kp = ([tracked.index(n) for n in (tracked[0], *self.sparse_bodies)]
+                       if self.sparse_bodies else sparse5_bodies(tuple(tracked)))
             self.kp_p, self.kp_R = self.body_p[:, self.kp].contiguous(), self.body_R[:, self.kp].contiguous()
 
     def goal_dim(self, K: int) -> int:

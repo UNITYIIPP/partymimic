@@ -11,6 +11,7 @@ Usage: python tools/play_onnx.py logs/<run>/dance1_subject2.onnx --robot g1 \
 """
 
 import argparse
+import json
 
 import numpy as np
 import onnxruntime as ort
@@ -22,6 +23,7 @@ from partymimic.kinematics import Kinematics
 from partymimic.mdp import MAX_STEP_REWARD, MDP
 from partymimic.motion import MotionLib
 from partymimic.robot import get_robot
+from partymimic.control import control_snapshot, validate_control
 
 
 def quat_to_mat(q: np.ndarray) -> np.ndarray:
@@ -36,7 +38,8 @@ def quat_to_mat(q: np.ndarray) -> np.ndarray:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("onnx")
-    ap.add_argument("--robot", type=str, default="g1")
+    ap.add_argument("--robot", type=str, default=None)
+    ap.add_argument("--clip", type=str, help="clip name inside a packed --motion archive")
     ap.add_argument("--motion", type=str, required=True, help="the motion baked into the ONNX")
     a = ap.parse_args()
 
@@ -46,10 +49,11 @@ def main():
     q0, H = vec("default_joint_pos"), int(meta["observation_history"])
 
     dev = "cuda:0"
-    robot = get_robot(a.robot)
+    robot = get_robot(a.robot or meta.get("robot", "g1"))
+    validate_control({"robot_control": json.loads(meta.get("robot_control", "null"))}, control_snapshot(robot))
     assert ",".join(robot.joint_names) == meta["joint_names"]
     kin = Kinematics(robot, dev)
-    motion = MotionLib([a.motion], kin, dev, robot.load_motion)
+    motion = MotionLib.from_single(a.motion, robot, kin, dev, a.clip or meta.get("motion_clip") or None)
     mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
     env = TrackingSim(make_sim(robot), 1, robot, motion, mdp, dev, eval_mode=True)
     env.done_eval[:] = False

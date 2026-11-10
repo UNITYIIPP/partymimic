@@ -17,6 +17,7 @@ from .rotations import axis_angle_to_mat, mm3, mv3, quat_to_mat
 
 class Kinematics:
     def __init__(self, robot: RobotSpec, device: str):
+        self.robot = robot
         m = mujoco.MjModel.from_xml_path(robot.mjcf_path)
         self.device = device
         tracked = robot.tracked_bodies

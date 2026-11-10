@@ -21,7 +21,7 @@ import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument("ckpts", nargs="+")
-parser.add_argument("--robot", type=str, default="g1")
+parser.add_argument("--robot", type=str, default=None)
 parser.add_argument("--out", type=str, default="results/metrics")
 args = parser.parse_args()
 
@@ -35,25 +35,26 @@ from partymimic.mdp import MAX_STEP_REWARD, MDP
 from partymimic.motion import MotionLib
 from partymimic.networks import Policy, policy_kwargs
 from partymimic.robot import get_robot
-
-CONTACT_Z = 0.045  # ankle-roll link origin height below which a foot counts as in contact (flat foot: ~0.035 m)
-FLAT_Z = 0.033
+from partymimic.control import control_snapshot, validate_control
 
 torch.backends.cuda.matmul.allow_tf32 = True
 dev = "cuda:0"
-robot = get_robot(args.robot)
+_run_args = torch.load(args.ckpts[0], map_location="cpu", weights_only=False)["args"]
+robot = get_robot(args.robot or _run_args.get("robot", "g1"))
+ROBOT_CONTROL = control_snapshot(robot)
+CONTACT_Z, FLAT_Z = robot.contact_height, robot.flat_foot_height
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(robot.motion_dir, robot, kin, dev)
-_args_json = os.path.join(os.path.dirname(args.ckpts[0]), "args.json")  # one interface for all checkpoints (load_policy)
-motion.set_interface(json.load(open(_args_json)).get("interface", "joint") if os.path.exists(_args_json) else "joint",
-                     robot.tracked_bodies)
+motion = MotionLib.from_source(robot, kin, dev, motion_dir=_run_args.get("motion_dir"), motion_file=_run_args.get("motion_file"))
+motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
-FEET = [robot.tracked_bodies.index(b) for b in ("left_ankle_roll_link", "right_ankle_roll_link")]
+FEET = [robot.tracked_bodies.index(b) for b in robot.feet]
 
 
 def load_policy(ck):
+    validate_control(ck, ROBOT_CONTROL)
     a_ = ck["args"]
+    assert all(a_.get(k) == _run_args.get(k) for k in ("motion_file", "motion_dir")), "checkpoints need the same motion source"
     assert a_.get("interface", "joint") == motion.interface, "all checkpoints need the same --interface"
     widths = lambda key: tuple(int(x) for x in a_.get(key, "2048,1024,512,256").split(","))  # noqa: E731
     pi = Policy(mdp.obs_dim, motion.goal_dim(a_["goal_frames"]), robot.num_joints, hist=a_["hist"],
@@ -84,8 +85,9 @@ def run(cks):
             sl = slice(m * C, (m + 1) * C)
             a[sl] = pi(hist[sl], g[sl])
         alive = (~env.done_eval).float()
-        f1 = env.f + 1
+        f1 = torch.minimum(env.f + 1, clip_end)
         out = env.step(a)
+        env.f = torch.minimum(env.f, clip_end - 1)
         S1 = env.state()
         t = out["terms"]
         bp, _, bv, _ = kin.forward(*S1)

@@ -37,7 +37,6 @@ def obs_scale(J: int, interface: str = "joint") -> torch.Tensor:
     )
 
 
-CONTACT_Z = 0.045  # ankle-roll link origin height below which a foot counts as in contact (as in tools/eval_metrics.py)
 MAX_STEP_REWARD = (4 * 1.0 + 2 * 0.5) * CONTROL_DT
 
 
@@ -93,6 +92,7 @@ class MDP:
     def __init__(self, kin: Kinematics, motion: MotionLib, default_q: torch.Tensor, xi_dim: int,
                  sensing: SensingCfg = SensingCfg(), cfg: RewardCfg = RewardCfg()):  # fmt: skip
         self.kin, self.motion, self.cfg = kin, motion, cfg
+        self.contact_height = kin.robot.contact_height
         self.default_q = default_q
         mid, half = (kin.q_lo + kin.q_hi) / 2, (kin.q_hi - kin.q_lo) / 2
         self.soft_lo, self.soft_hi = mid - half * cfg.soft_limit_factor, mid + half * cfg.soft_limit_factor
@@ -173,9 +173,9 @@ class MDP:
         r = (r_track + c.w_action_rate * r_rate + c.w_joint_limit * r_lim) * CONTROL_DT
         if w_contact > 0:
             fz, rz = bp[..., self.feet, 2], m.body_p[f][..., self.feet, 2]
-            c_sim = torch.sigmoid((CONTACT_Z - fz) / 0.005)
-            rc = getattr(m, "ref_contact", None)  # MotionLib.set_ref_contact (set by the trainer), else the fixed 4.5 cm
-            c_ref = rc[f] if rc is not None else (rz < CONTACT_Z).float()
+            c_sim = torch.sigmoid((self.contact_height - fz) / 0.005)
+            rc = getattr(m, "ref_contact", None)  # clip-relative labels, otherwise the robot's height threshold
+            c_ref = rc[f] if rc is not None else (rz < self.contact_height).float()
             slip = (bv[..., self.feet, :2] ** 2).sum(-1)
             r_contact = (1 - (c_sim - c_ref) ** 2) + c_ref * torch.exp(-slip / 0.3**2)
             r = r + w_contact * r_contact.mean(-1) * CONTROL_DT

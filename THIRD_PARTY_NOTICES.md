@@ -65,3 +65,11 @@ their own distributions under their own licenses (Apache-2.0, BSD-3-Clause and o
 Motion data are not redistributed. The LAFAN1 motions (Ubisoft La Forge, CC BY-NC-ND 4.0) and the Unitree G1
 description (BSD-3-Clause) are downloaded by `tools/download_data.sh`; files derived from motion data (the videos in
 `docs/static/videos`, checkpoints) are not covered by this repository's MIT License.
+
+## EVT integration
+
+The EVT control values in `assets/evt/config.json` come from the user's local allmimic checkout, branch `armature`,
+commit `e17f339` (`DEX_EVT_CFG`). `tools/prepare_evt.py` imports its `assets/robots/evt/urdf/evt2_simple.xml` and
+STL meshes into the git-ignored `data/evt/` directory and records source hashes. These third-party robot assets
+are not redistributed here, and this repository does not assign them a new license. The EVT LAFAN1 motion archive
+is read from its existing location; the LAFAN1 data terms above still apply.

@@ -31,13 +31,15 @@ import torch.nn as nn
 import partymimic.networks as networks
 from partymimic.kinematics import Kinematics
 from partymimic.mdp import MDP, obs_dim, obs_err_dim
-from partymimic.motion import CONTROL_DT, MotionLib, load_npz
+from partymimic.motion import CONTROL_DT, MotionLib
 from partymimic.networks import Policy, policy_kwargs
 from partymimic.robot import get_robot
 from partymimic.rotations import mat_to_6d, mat_to_quat, mm3, mv3, quat_to_mat, quat_to_rotvec, so3_log, yaw_mat
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deploy_yaml import build_blink, build_blink_robot, build_sparse5  # noqa: E402
+
+from partymimic.control import control_snapshot, validate_control
 
 SPEC = None  # the checkpoint's robot (load)
 P = 93  # proprio entries per step before the 6D relative orientation: 3 J + 6
@@ -127,6 +129,7 @@ def load(ckpt: str) -> tuple[Policy, dict]:
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     a = ck["args"]
     SPEC = get_robot(a.get("robot", "g1"))
+    validate_control(ck, control_snapshot(SPEC))
     P = 3 * len(SPEC.joint_names) + 6
     if a.get("wm_contact", 0) or a.get("pi_arch", "mlp") != "mlp":
         raise SystemExit("unsupported policy architecture")
@@ -225,15 +228,16 @@ def main() -> None:
 
     kin = Kinematics(SPEC, "cpu")
     # a few clips of the training library are enough for the checks
-    md = Path(args.get("motion_dir") or SPEC.motion_dir)
-    if not md.is_dir():  # trained on another machine
-        md = Path(os.environ.get("MOTION_DIR", SPEC.motion_dir))
-    files, loader = sorted(md.glob(SPEC.motion_glob))[:8], SPEC.load_motion
-    if not files:
-        files, loader = sorted(md.glob("*.npz"))[:8], load_npz
-    if not files:
-        raise SystemExit(f"no motions in {md} for the export checks; set MOTION_DIR")
-    motion = MotionLib([str(f) for f in files], kin, "cpu", loader)
+    source_file = os.environ.get("MOTION_FILE") or args.get("motion_file")
+    source_dir = os.environ.get("MOTION_DIR") or args.get("motion_dir")
+    if os.environ.get("MOTION_FILE"):
+        source_dir = None
+    elif os.environ.get("MOTION_DIR"):
+        source_file = None
+    if not source_file and (not source_dir or not Path(source_dir).is_dir()):
+        source_dir = SPEC.motion_dir
+    motion = MotionLib.from_source(SPEC, kin, "cpu", motion_file=source_file,
+                                   motion_dir=source_dir, max_clips=8)
     if sparse5:
         motion.set_interface("sparse5", SPEC.tracked_bodies)
         export_sparse5(pi, args, motion, kin, Path(a.out))
@@ -242,7 +246,8 @@ def main() -> None:
         geo = check_geometry(dep, motion)
         # relative orientation and the full policy against Policy(obs_hist, MotionLib.goal)
         g = torch.Generator().manual_seed(1)
-        f = int(motion.clip_start[3]) + 100
+        c = min(3, len(motion.names) - 1)
+        f = int(motion.clip_start[c]) + min(100, int(motion.clip_len[c]) - 2)
         jp, rr = window(motion, f, K)
         prop = torch.randn(H * P, generator=g) * 0.3
         rq = torch.nn.functional.normalize(torch.randn(H, 4, generator=g), dim=-1)

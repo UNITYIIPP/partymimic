@@ -19,6 +19,7 @@ Usage: python tools/export_onnx.py --robot g1 --ckpt logs/<run>/ckpt_003500.pt \
 """
 
 import argparse
+import json
 import os
 import re
 
@@ -32,6 +33,7 @@ from partymimic.mdp import obs_dim
 from partymimic.motion import CONTROL_DT, MotionLib
 from partymimic.networks import Policy, policy_kwargs
 from partymimic.robot import RobotSpec, get_robot
+from partymimic.control import control_snapshot, validate_control
 from partymimic.rotations import mat_to_quat
 
 OUTPUTS = ["actions", "joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w", "next_anchor_quat_w"]
@@ -69,19 +71,22 @@ def pd_gains(robot: RobotSpec) -> tuple[list[float], list[float]]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--robot", type=str, default="g1")
+    ap.add_argument("--robot", type=str, default=None)
+    ap.add_argument("--clip", type=str, help="clip name inside a packed --motion archive")
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--motion", type=str, required=True, help="one motion file in the robot's format")
     ap.add_argument("--out", type=str, required=True)
     a = ap.parse_args()
 
     dev = "cpu"
-    robot = get_robot(a.robot)
-    ck = torch.load(a.ckpt, map_location=dev)
+    ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
+    robot = get_robot(a.robot or ck["args"].get("robot", "g1"))
+    snapshot = control_snapshot(robot)
+    validate_control(ck, snapshot)
     if ck["args"].get("interface", "joint") != "joint":
         raise SystemExit("--interface sparse5: use tools/export_deploy_onnx.py (its observation needs the keypoint errors)")
     K, Hh = ck["args"]["goal_frames"], ck["args"]["hist"]
-    motion = MotionLib([a.motion], Kinematics(robot, dev), dev, robot.load_motion)
+    motion = MotionLib.from_single(a.motion, robot, Kinematics(robot, dev), dev, a.clip)
     networks.AMP_DTYPE = None  # fp32 graph (training ran the MLPs under bf16 autocast)
     widths = lambda key: tuple(int(x) for x in ck["args"].get(key, "2048,1024,512,256").split(","))  # noqa: E731
     pi = Policy(obs_dim(robot.num_joints), motion.goal_dim(K), robot.num_joints, hist=Hh, enc_hidden=widths("enc_hidden"),
@@ -98,7 +103,10 @@ def main():
     fmt = lambda xs: ",".join(f"{float(x):.6g}" for x in xs)  # noqa: E731
     meta = {
         "run_path": os.path.abspath(a.ckpt),
-        "motion": os.path.splitext(os.path.basename(a.motion))[0],
+        "motion": motion.names[0],
+        "robot": robot.name,
+        "motion_clip": a.clip or "",
+        "robot_control": json.dumps(snapshot),
         "motion_num_frames": str(motion.num_frames),
         "joint_names": ",".join(robot.joint_names),
         "joint_stiffness": fmt(kp),

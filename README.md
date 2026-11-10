@@ -70,7 +70,7 @@ SIM2REAL=<patched sim2real checkout> bash scripts/eval.sh checkpoints/g1_mlp.pt 
 bash scripts/train.sh logs/g1_ft --robot g1mj --motion_dir <a few clips> --init checkpoints/g1_mlp.pt --iterations 2000
 ```
 
-The export checks the ONNX against the PyTorch policy on a few training clips (at least 4). Without the training
+The export checks the ONNX against the PyTorch policy on up to 8 training clips. Without the training
 library it uses the LAFAN1 clips for G1; for RP1 point `MOTION_DIR` at a directory of RP1 motion npz clips.
 
 ## Setup
@@ -141,6 +141,63 @@ process; `P` processes run in parallel over the GPUs in `GPUS`. The RP1 copy of 
 the robot's joint order (`src/partymimic/<robot>/`), and the pelvis pose as the first body of `body_pos_w`
 `[T, B, 3]` and `body_quat_w` `[T, B, 4]` (wxyz). PartyMimic computes the other bodies by forward kinematics.
 
+## EVT（29 自由度）
+
+EVT 接入沿用本项目的训练、观测、奖励和随机化框架，模型与控制参数来自本地 allmimic 的
+`armature` 分支 `e17f339`。首次使用先准备资源（生成到忽略提交的 `data/evt/`）：
+
+```bash
+uv run python tools/prepare_evt.py \
+  --source /mnt/dataset/lqi3lr/dyh/allmimic_amature/allmimic/assets/robots/evt \
+  --reference-urdf /mnt/dataset/lqi3lr/dyh/allmimic/assets/robots/evt/urdf/tiangong2dex.urdf
+```
+
+脚本清理 `evt2_simple.xml` 的内嵌地面、传感器和执行器，保留连杆惯量，并应用
+[`assets/evt/config.json`](assets/evt/config.json) 中的被动关节参数。训练由 `EntityCfg` 添加 29 个位置 PD
+执行器。PD、力矩上限、非零 armature 和逐关节动作尺度均使用该 JSON；当前动作延迟和被动关节摩擦为零。
+修改配置后需重新运行准备脚本。脚部名称、接触高度和左右镜像由 EVT 配置提供；源模型有小幅左右几何偏差，
+镜像为近似对称。接触高度 `0.07 m`、平脚基准 `0.0586 m` 是基于模型几何的初始值，仍需随训练表现验证。
+
+脚部保留 7 个胶囊体，每段包含半球端部的总长度与参考 URDF 的对应圆柱长度相同；足底前后范围
+从约 24 cm 扩至 26 cm（踝坐标系 X 为 −8.5～17.5 cm），宽度仍约 8.4 cm。省略 `--reference-urdf`
+时使用源目录中的 `urdf/tiangong2dex.urdf`。生成记录包含参考 URDF 哈希。
+
+接触设置采用默认 `g1mj` 的 FULL_COLLISION 规则：脚部 `condim=3, priority=1`，其余碰撞体
+`condim=1, priority=0`，地面 `condim=3, priority=0`。MuJoCo 在同优先级时取较大的接触维度，
+所以手、膝、躯干接地仍有切向摩擦；非足部之间的自身碰撞使用法向约束。每个环境的摩擦样本
+（0.3–1.2）应用于全身碰撞体，地面设为 0.3；评估时均为 1.0。地面查找覆盖焊接到 world 的固定刚体，
+包括 mjlab 的 terrain。脚长和摩擦配置变化会触发旧 EVT checkpoint 的一致性检查，需用新模型重新训练。
+
+训练数据直接读取已有打包文件，无须拆分或重新重定向：
+
+```bash
+bash scripts/train.sh logs/evt_s0 --robot evt \
+  --motion_file /mnt/dataset/lqi3lr/dyh/allmimic/data/processed/evt_lafan1_50hz.npz
+```
+
+`--motion_file` 与 `--motion_dir` 互斥。该 `compact_v1` 文件包含 40 段动作、441,140 帧、50 Hz 数据。
+加载器按 `starts/lengths/names` 保留动作边界、按关节名校验/重排、归一化 wxyz 四元数；50 Hz 输入保留全部原帧。
+速度按 PartyMimic 的方法在每段内重新计算，FK 和参考接触标签由当前模型计算。`--interface sparse5`
+也支持 EVT 的躯干、双腕和双踝映射。网络和优化参数继续采用本项目默认值。
+
+```bash
+# 评估读取训练配置中的机器人及 motion_file；也可显式指定新的 --motion_file
+uv run python -m partymimic.evaluate --run_dir logs/evt_s0 --ckpt logs/evt_s0/last.pt
+# 部署 ONNX + YAML（检查使用训练数据；迁移机器后可设置 MOTION_FILE）
+uv run python tools/export_deploy_onnx.py logs/evt_s0/last.pt logs/evt_s0/evt.onnx
+# 从打包文件选择一个动作，导出内嵌参考动作的 ONNX
+uv run python tools/export_onnx.py --ckpt logs/evt_s0/last.pt \
+  --motion /mnt/dataset/lqi3lr/dyh/allmimic/data/processed/evt_lafan1_50hz.npz \
+  --clip walk1_subject1 --out logs/evt_s0/walk.onnx
+# CPU 接入检查，需要先准备 EVT 资源
+uv run python -m unittest discover -s tests -v
+```
+
+EVT checkpoint 保存有效控制参数和 XML/config/mesh 哈希；恢复训练、评估、导出会检查一致性。
+部署 YAML 附带 `robot_control`，其中包含 armature、被动摩擦和力矩限制等；外部控制器/仿真必须自行应用这些参数。
+本仓库原有 `tools/sim2real.patch` 尚不提供外部 sim2real 项目的 EVT 机器人配置。
+数据中的跌倒起身动作保留，终止条件仍按相对参考误差判断。此接入不代表已经训练出可部署的 EVT 策略。
+
 ## Train
 
 The defaults of `partymimic.train` are the PartyMimic recipe:
@@ -168,6 +225,19 @@ at 22.6 and 23.4 GB. Checkpoints are written every 2,000 iterations (`ckpt_00200
   highly dynamic clips.
 
 `uv run python -m partymimic.train -h` lists the remaining options.
+
+Training metrics are written to `train_log.csv` every `--log_every` iterations. To view an existing or running
+training session in TensorBoard without restarting it, run these commands in two terminals (install `tensorboard`
+in the environment if needed):
+
+```bash
+python tools/csv_tensorboard.py --log_dir logs/evt_s0_2gpu --follow
+tensorboard --logdir logs/evt_s0_2gpu/tensorboard --host 127.0.0.1 --port 6006
+```
+
+Open `http://localhost:6006` (forward port 6006 when using a remote server). Scalars include world-model error,
+policy/critic loss, rollout return, episode length, termination fraction and training speed. The converter follows
+the CSV logging frequency; it cannot show iterations that the trainer has not yet logged.
 
 ## Evaluate, export, visualize
 

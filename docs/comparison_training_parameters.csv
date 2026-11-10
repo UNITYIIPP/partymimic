@@ -1,0 +1,146 @@
+﻿project,parameter,declared_default,effective_default,recommended,root_feedback,root_feedback_delay,choices,help_or_comment,source,line
+PartyMimic,--robot,g1mj,g1mj,N/A,N/A,N/A,,"robot package under partymimic/ (g1mj, rp1, g1)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,18
+PartyMimic,--motion_dir,None,None,N/A,N/A,N/A,,defaults to the robot's motion directory,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,19
+PartyMimic,--log_dir,"os.path.join(REPO, 'logs', 'run')",/mnt/dataset/lqi3lr/dyh/PartyMimic/logs/run,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,20
+PartyMimic,--seed,0,0,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,21
+PartyMimic,--resume,None,None,N/A,N/A,N/A,,last.pt of a run to continue,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,22
+PartyMimic,--init,None,None,N/A,N/A,N/A,,"last.pt whose world model, policy and critic start this run (fine-tuning, e.g. on a few clips); optimizers, learning-rate control and reset statistics start fresh",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,23
+PartyMimic,--iterations,12000,12000,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,26
+PartyMimic,--ckpt_every,2000,2000,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,27
+PartyMimic,--ckpt_minutes,0.0,0.0,N/A,N/A,N/A,,also checkpoint every n minutes of training wall-clock,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,28
+PartyMimic,--max_hours,None,None,N/A,N/A,N/A,,stop after this much training wall-clock,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,29
+PartyMimic,--log_every,50,50,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,30
+PartyMimic,--pipeline,False,False,N/A,N/A,N/A,,"two GPUs: collection and the world model on cuda:0, the policy and critic update on cuda:1, side by side; the policy update reads the replay buffer and world model of the previous iteration",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,31
+PartyMimic,--num_envs,4096,4096,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,35
+PartyMimic,--buffer_steps,1000,1000,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,36
+PartyMimic,--utd,0.4,0.4,N/A,N/A,N/A,,updates per vectorized simulator step,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,37
+PartyMimic,--warmup_steps,64,64,N/A,N/A,N/A,,sim steps before any update,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,38
+PartyMimic,--horizon,32,32,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,39
+PartyMimic,--goal_frames,10,10,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,40
+PartyMimic,--hist,10,10,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,41
+PartyMimic,--interface,joint,joint,N/A,N/A,N/A,"('joint', 'sparse5')","reference interface of the policy (motion.INTERFACES): joint = root motion + joint positions / velocities per goal frame; sparse5 = pelvis / head / wrist / ankle poses per goal frame and an explicit keypoint-error block for the decoder, with --kp_skip and --kp_aux on by default",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,42
+PartyMimic,--kp_skip,None,joint: False; sparse5: True,N/A,N/A,N/A,,"sparse5 (default on): reference-action skip on an estimated reference, a = kp2q(goal) / alpha + dec(...), kp2q an MLP from the goal to q_ref(f+1) - q0 fit to the motion library before training, frozen",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,46
+PartyMimic,--kp_hidden,"1024,1024,512","1024,1024,512",N/A,N/A,N/A,,--kp_skip: hidden widths of kp2q,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,49
+PartyMimic,--kp_steps,20000,20000,N/A,N/A,N/A,,--kp_skip: Adam steps (batch 8192) of the kp2q fit,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,50
+PartyMimic,--kp_aux,None,joint: 0.0; sparse5: 1.0,N/A,N/A,N/A,,"sparse5 (default 1.0): weight of an auxiliary loss on the policy, a linear head on the reference latent predicting the goal frames' joint positions (rad, mean squared error)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,51
+PartyMimic,--gamma,0.99,0.99,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,54
+PartyMimic,--lam,0.95,0.95,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,55
+PartyMimic,--action_noise,0.1,0.1,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,56
+PartyMimic,--amp,bf16,bf16,N/A,N/A,N/A,"['none', 'bf16']",autocast dtype for MLP matmuls,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,57
+PartyMimic,--std_scale,0.35,0.35,N/A,N/A,N/A,,training reward only: scale of the body / root position and orientation kernel widths (evaluation keeps SuperMimic's reward),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,59
+PartyMimic,--contact_reward,0.25,0.25,N/A,N/A,N/A,,weight of the contact-matching / anti-slip reward term in imagination (evaluation reward unchanged),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,62
+PartyMimic,--fail_reset,0.3,0.3,N/A,N/A,N/A,,share of resets sampled one bin before recent termination points (anti-forgetting of hard clips),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,64
+PartyMimic,--div_k,24,24,N/A,N/A,N/A,,"reset sampling: the uniform share by motion diversity, k-means clusters of the bins' motion features with mass ~ (bins in the cluster)^--div_tau (0 = by duration)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,66
+PartyMimic,--div_tau,0.0,0.0,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,69
+PartyMimic,--ref_enc,mlp,mlp,N/A,N/A,N/A,"('mlp', 'xattn')","motion encoder: mlp = enc(goal); xattn = dynamics-conditioned cross-attention, a causal Transformer over the observation history queries the goal frames (RGMT)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,70
+PartyMimic,--xattn_dim,128,128,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,73
+PartyMimic,--xattn_heads,4,4,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,74
+PartyMimic,--wm_hidden,"1024,1024,1024","1024,1024,1024",N/A,N/A,N/A,,world-model MLP widths,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,76
+PartyMimic,--wm_structured,True,True,N/A,N/A,N/A,,semi-implicit world model: velocity increments + position corrections on top of the trapezoidal drift,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,77
+PartyMimic,--wm_mirror,0.5,0.5,N/A,N/A,N/A,,share of each world-model batch replaced by its left-right mirror image (physical symmetry; 0 = off),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,79
+PartyMimic,--wm_window,8,8,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,81
+PartyMimic,--wm_batches,5,5,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,82
+PartyMimic,--wm_batch,2048,2048,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,83
+PartyMimic,--wm_opt,muon,muon,N/A,N/A,N/A,"['adam', 'muon']","world-model optimizer: muon = Muon on the hidden weight matrices of the MLP, Adam elsewhere",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,84
+PartyMimic,--wm_only_iters,0,0,N/A,N/A,N/A,,world-model-only iterations at the start,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,86
+PartyMimic,--enc_hidden,"2048,1024,512,256","2048,1024,512,256",N/A,N/A,N/A,,motion-encoder MLP widths,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,88
+PartyMimic,--dec_hidden,"2048,1024,512,256","2048,1024,512,256",N/A,N/A,N/A,,shared-decoder MLP widths,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,89
+PartyMimic,--pi_ref_skip,True,True,N/A,N/A,N/A,,"reference-action skip connection, a = (q_ref(f+1) - q0) / alpha + network output",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,90
+PartyMimic,--pi_batch,2048,2048,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,92
+PartyMimic,--pi_opt,muon,muon,N/A,N/A,N/A,"['adam', 'muon']","policy optimizer: muon = Muon (Jordan et al. 2024) on the weight matrices of the encoder and decoder at Adam's update RMS (same lr), Adam on vectors",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,93
+PartyMimic,--pi_muon_io,True,True,N/A,N/A,N/A,,--pi_opt muon on the first and last Linear of the policy MLPs too (else Adam there),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,96
+PartyMimic,--pi_beta1,0.9,0.9,N/A,N/A,N/A,,Adam beta1 of the policy,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,98
+PartyMimic,--pi_clip_value,0.1,0.1,N/A,N/A,N/A,,element-wise policy gradient clip after the norm clip (<= 0: off),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,99
+PartyMimic,--pi_ema,0.995,0.995,N/A,N/A,N/A,,Polyak average of the policy weights (decay per update); checkpoints store the average as 'pi',/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,100
+PartyMimic,--sil,1.0,1.0,N/A,N/A,N/A,,"weight of self-imitation at the imagination starts: regress the policy action onto the recorded (noisy) action where its recorded return G exceeds V(s_0), weighted by the advantage (0 = off)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,102
+PartyMimic,--sil_wmax,5.0,5.0,N/A,N/A,N/A,,--sil: cap of the advantage weight (mean |A| units),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,106
+PartyMimic,--critic_epochs,5,5,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,108
+PartyMimic,--critic_minibatches,4,4,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,109
+PartyMimic,--v_gcons,0.5,0.5,N/A,N/A,N/A,,"critic: weight of the value-gradient consistency loss, grad_s V(S_k) fit to the BPTT gradient of the imagined return from S_k (k = 1..H-1, per-coordinate one-step-change scales; 0 = off)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,110
+PartyMimic,--v_gcons_n,4096,4096,N/A,N/A,N/A,,--v_gcons: states per critic minibatch,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,113
+PartyMimic,--v_gcons_epochs,1,1,N/A,N/A,N/A,,--v_gcons: in the minibatches of the first this many epochs,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,114
+PartyMimic,--lr,0.0004,0.0004,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,116
+PartyMimic,--lr_decay_iters,250000,250000,N/A,N/A,N/A,,cosine decay of every learning rate,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,117
+PartyMimic,--pi_lr_mult,4.0,4.0,N/A,N/A,N/A,,policy learning rate = --lr x this (world model and critic keep --lr),/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,118
+PartyMimic,--lr_decay_ret,0.75,0.75,N/A,N/A,N/A,,"progress-triggered decay of --pi_lr_mult (0 = off): once the logged training return (ep_ret_norm) reaches this, the policy LR multiplier ramps linearly to 1 over --lr_decay_len iterations",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,120
+PartyMimic,--lr_decay_len,300,300,N/A,N/A,N/A,,,/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,123
+PartyMimic,--lr_decay_by,1400,1400,N/A,N/A,N/A,,"with --lr_decay_ret: start the decay at this iteration at the latest, also if the training return has not reached --lr_decay_ret (0 = no deadline)",/mnt/dataset/lqi3lr/dyh/PartyMimic/src/partymimic/train.py,124
+allmimic,--motions,data/processed/lafan1_50hz.npz,data/processed/lafan1_50hz.npz,data/processed/lafan1_50hz.npz,data/processed/lafan1_50hz.npz,data/processed/lafan1_50hz.npz,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,51
+allmimic,--clip-prefixes,,,,,,,"e.g. ""walk,run,sprint"" for the Fig. 4b subset",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,52
+allmimic,--clip-list,,,,,,,file with one clip name per line to keep (feasible whitelist); empty = all clips,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,53
+allmimic,--softmax-cap,0.0,0.0,50.0,50.0,50.0,,"EnvCfg.softmax_cap: per-bin cap of the reset-sampling softmax, x uniform share (#19)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,54
+allmimic,--out,runs/debug,runs/debug,runs/debug,runs/debug,runs/debug,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,55
+allmimic,--seed,0,0,0,0,0,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,56
+allmimic,--num-envs,4096,4096,4096,4096,4096,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,57
+allmimic,--buffer-steps,1000,1000,1000,1000,1000,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,58
+allmimic,--iterations,320000,320000,320000,320000,320000,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,59
+allmimic,--utd,0.4,0.4,0.4,0.4,0.4,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,60
+allmimic,--warmup-steps,64,64,64,64,64,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,61
+allmimic,--k,8,8,8,8,8,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,63
+allmimic,--wm-batch,2048,2048,2048,2048,2048,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,64
+allmimic,--wm-batches,10,10,10,10,10,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,65
+allmimic,--horizon,32,32,32,32,32,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,67
+allmimic,--pi-batch,4096,4096,4096,4096,4096,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,68
+allmimic,--gamma,0.99,0.99,0.99,0.99,0.99,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,69
+allmimic,--lam,0.95,0.95,0.95,0.95,0.95,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,70
+allmimic,--lr,0.0002,0.0002,0.0002,0.0002,0.0002,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,71
+allmimic,--lr-final-frac,0.03,0.03,0.03,0.03,0.03,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,72
+allmimic,--lr-decay-iters,250000,250000,250000,250000,250000,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,73
+allmimic,--critic-epochs,5,5,5,5,5,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,74
+allmimic,--critic-minibatches,4,4,4,4,4,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,75
+allmimic,--action-noise,0.1,0.1,0.1,0.1,0.1,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,76
+allmimic,--collect-det-frac,0.0,0.0,0.25,0.25,0.25,,"share of envs that collect without action noise, as deployed",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,78
+allmimic,--img-action-noise,0.0,0.0,0.0,0.0,0.0,,"N(0, x) on imagined actions, like the collected ones (reparameterized)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,79
+allmimic,--pi-clip,1.0,1.0,0.03125,0.03125,0.03125,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,82
+allmimic,--critic-heads,1,1,1,1,1,,"> 1: critic ensemble, per-head lambda-returns, policy bootstraps on the mean",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,83
+allmimic,--value-clip,False,False,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,87
+allmimic,--wm-rot-out,axis,axis,axis,axis,axis,,'tripoint': the WM predicts the rotation change as tri-point markers (#25),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,88
+allmimic,--clean-prev-action,False,False,False,False,False,,the obs' last action and the action-rate term use the pre-noise action,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,90
+allmimic,--w-residual,0.0,0.0,0.0,0.0,0.0,,TaskCfg.w_residual: reward x sum of squared residual outputs (e.g. -0.02),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,91
+allmimic,--retire-g,0.0,0.0,0.0,0.0,0.0,,EnvCfg.retire_g: down-weight bins whose return stays below this (unlearnable tail),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,92
+allmimic,--bptt-detach,0,0,0,0,0,,> 0: detach the imagined state chain every k steps (truncated BPTT; J / critic unchanged),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,93
+allmimic,--gap-every,0,0,0,0,0,,"> 0: imagination-gap monitor every k iterations (deterministic policy, sim vs WM)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,94
+allmimic,--gap-envs,256,256,256,256,256,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,95
+allmimic,--bin-prior,,,,,,,npz written by tools/bin_clusters.py,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,97
+allmimic,--bin-prior-alpha,0.5,0.5,0.3,0.3,0.3,,which weight set: cluster share ~ size^alpha,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,98
+allmimic,--optimizer,adam,adam,adam,adam,adam,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,100
+allmimic,--use-critic,True,True,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,101
+allmimic,--log-every,100,100,100,100,100,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,103
+allmimic,--ckpt-every,4000,4000,4000,4000,4000,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,104
+allmimic,--eval-every,4000,4000,4000,4000,4000,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,105
+allmimic,--eval-clips,0,0,0,0,0,,0 = all clips,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,106
+allmimic,--eval-envs,4096,4096,4096,4096,4096,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,107
+allmimic,--wall-hours,1000000000.0,1000000000.0,1000000000.0,1000000000.0,1000000000.0,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,108
+allmimic,--tf32,True,True,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,109
+allmimic,--amp,True,True,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,110
+allmimic,--compile-wm,True,True,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,111
+allmimic,--wm-compile-mode,,,reduce-overhead,reduce-overhead,reduce-overhead,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,112
+allmimic,--lr-sqrt-world,True,True,True,True,True,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,115
+allmimic,--norm-update-every,5,5,5,5,5,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,116
+allmimic,--resume,,,,,,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,117
+allmimic,--goal-pos,current_ref,current_ref,current_ref,current_ref,current_ref,,future position relative to the current reference frame,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,118
+allmimic,--goal-rot,current_ref,current_ref,current_ref,current_ref,current_ref,,future orientation relative to current reference heading,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,119
+allmimic,--critic-future-root,False,False,False,True,True,,critic receives K future root poses relative to the current robot (9*K),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,120
+allmimic,--actor-ref-orientation,False,False,False,True,True,,append current robot-relative reference root orientation (6 per frame),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,121
+allmimic,--noise-ref-orientation,0.05,0.05,0.05,0.05,0.05,,uniform half-width on actor rotation components,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,122
+allmimic,--goal-pos-noise,0.0,0.0,0.0,0.0,0.0,,TaskCfg.goal_pos_noise: training noise (m) on goal root positions,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,123
+allmimic,--action,abs,abs,res,res,res,,"TaskCfg.action: ""abs"" setpoints around q0 (upstream) or ""res"" residual on the reference (#11)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,124
+allmimic,--res-scale,1.0,1.0,1.0,1.0,1.0,,TaskCfg.res_scale: residual scale in units of action_scale,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,125
+allmimic,--future-offsets,,,,,,,"TaskCfg.future_offsets, e.g. ""1,2,3,4,6,10,15,25,40,60"" (#12); empty = 1..10",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,126
+allmimic,--latent,32,32,128,128,128,,policy motion latent width (tanh bottleneck; #13),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,127
+allmimic,--compile-bptt,,,reduce-overhead,reduce-overhead,reduce-overhead,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,130
+allmimic,--bptt-checkpoint,0,0,0,0,0,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,134
+allmimic,--heading,xaxis,xaxis,xaxis,xaxis,xaxis,,"TaskCfg.heading: ""xaxis"" (upstream) or ""twist"" (no singularity when lying / crawling; #14)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,135
+allmimic,--res-legs,res,res,abs,abs,abs,,"TaskCfg.res_legs: ""res"" or ""abs"" (legs absolute, upper body residual; #20)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,136
+allmimic,--res-scale-legs,0.0,0.0,0.0,0.0,0.0,,TaskCfg.res_scale_legs: legs' own residual scale (0 = res_scale),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,137
+allmimic,--wm-joint-weights,,,tracked,tracked,tracked,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,140
+allmimic,--wm-joint-weight-clip,4.0,4.0,4.0,4.0,4.0,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,141
+allmimic,--wm-norm-eps,0.001,0.001,0.001,0.001,0.001,,WM input normalizer std floor (upstream 1e-3; #20 suggests ~0.05),/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,142
+allmimic,--rot-repr,6d,6d,6d,6d,6d,,"TaskCfg.rot_repr: ""6d"" (upstream) or ""tripoint"" (tri-point markers; inputs only; #18)",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,143
+allmimic,--robot,g1,g1,g1,g1,g1,,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,144
+allmimic,--action-delay,False,False,False,False,True,,Opt-in keeps legacy runs/checkpoints at xi_dim=33.,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,145
+allmimic,--delay-legs,"0,4","0,4","0,4","0,4","0,4",,"Inclusive physics-substep bounds, sampled independently at each reset.",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,146
+allmimic,--delay-feet,"0,4","0,4","0,4","0,4","0,4",,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,147
+allmimic,--delay-waist,"0,4","0,4","0,4","0,4","0,4",,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,148
+allmimic,--delay-arms,"0,4","0,4","0,4","0,4","0,4",,,/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,149
+allmimic,--delay-eval,max,max,max,max,max,,"Evaluation: none, max, random. Training always samples the configured ranges.",/mnt/dataset/lqi3lr/dyh/allmimic/allmimic/train.py,150

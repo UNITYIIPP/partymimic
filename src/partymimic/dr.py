@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import mujoco
+import numpy as np
 import torch
 from mjlab.envs.mdp import dr
 from mjlab.managers.event_manager import RecomputeLevel
@@ -129,6 +130,11 @@ class XiLayout:
         return xi[..., self.slices[name]]
 
 
+def ground_geom_ids(model: mujoco.MjModel) -> np.ndarray:
+    """Geoms welded to world, including mjlab terrain in a separate fixed body."""
+    return np.flatnonzero(model.body_weldid[model.geom_bodyid] == 0)
+
+
 class DomainRandomizer:
     """Samples and applies the per-env simulator parameters of ``robot.dr`` and writes them into xi.
 
@@ -147,7 +153,7 @@ class DomainRandomizer:
         geom_names = ent.geom_names
         self.friction_geoms = (ent.indexing.geom_ids if c.friction_geoms is None else
                                ent.indexing.geom_ids[[i for i, n in enumerate(geom_names) if re.fullmatch(c.friction_geoms, n)]])  # fmt: skip
-        self.ground_geoms = torch.nonzero(torch.as_tensor(sim.mj_model.geom_bodyid == 0, device=dev)).flatten()
+        self.ground_geoms = torch.as_tensor(ground_geom_ids(sim.mj_model), device=dev)
         if c.solref_geoms is not None:
             self.solref_geoms = ent.indexing.geom_ids[[i for i, n in enumerate(geom_names) if re.fullmatch(c.solref_geoms, n)]]
         self.dof_ids = ent.indexing.joint_v_adr
@@ -188,7 +194,7 @@ class DomainRandomizer:
     def startup(self, xi: torch.Tensor):
         c, sim, N, dev = self.cfg, self.env.sim, self.env.num_envs, self.env.device
         xi[:, self.layout.slices["friction"]] = 1.0 if self.eval_mode else torch.empty(N, 1, device=dev).uniform_(*c.friction_range)
-        # ground (world body): lowest friction of the range, since MuJoCo takes the max of a pair
+        # Static ground: lowest friction of the range, since MuJoCo takes the max of a pair.
         sim.model.geom_friction[:, self.ground_geoms, 0] = c.friction_range[0] if not self.eval_mode else 1.0
         sim.model.geom_friction[:, self.friction_geoms, 0] = xi[:, self.layout.slices["friction"]]
         if c.com_mass_range is None and not self.eval_mode:

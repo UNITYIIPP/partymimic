@@ -15,8 +15,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ON = argparse.BooleanOptionalAction
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--robot", type=str, default="g1mj", help="robot package under partymimic/ (g1mj, rp1, g1)")
-parser.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
+parser.add_argument("--robot", type=str, default="g1mj", help="robot package under partymimic/ (g1mj, rp1, g1, evt)")
+motion_source = parser.add_mutually_exclusive_group()
+motion_source.add_argument("--motion_file", type=str, default=None, help="packed motion archive (EVT compact_v1)")
+motion_source.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
 parser.add_argument("--log_dir", type=str, default=os.path.join(REPO, "logs", "run"))
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--resume", type=str, default=None, help="last.pt of a run to continue")
@@ -148,6 +150,7 @@ from partymimic.mirror import Mirror
 from partymimic.objective import actor_objective
 from partymimic.mdp import flatten_state
 from partymimic.robot import get_robot
+from partymimic.control import control_snapshot, validate_control
 from partymimic.sensing import ObsPipeline
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -157,12 +160,16 @@ networks.AMP_DTYPE = torch.bfloat16 if args.amp == "bf16" else None
 dev = "cuda:0"
 ldev = "cuda:1" if args.pipeline else dev  # the policy learner's GPU
 os.makedirs(args.log_dir, exist_ok=True)
+if args.resume and not (args.motion_dir or args.motion_file):
+    _saved_args = torch.load(args.resume, map_location="cpu", weights_only=False)["args"]
+    args.motion_dir, args.motion_file = _saved_args.get("motion_dir"), _saved_args.get("motion_file")
 json.dump(vars(args), open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
 
 robot = get_robot(args.robot)
+ROBOT_CONTROL = control_snapshot(robot)
 J = robot.num_joints
 kin = Kinematics(robot, dev)
-motion = MotionLib.from_dir(args.motion_dir or robot.motion_dir, robot, kin, dev)
+motion = MotionLib.from_source(robot, kin, dev, motion_dir=args.motion_dir, motion_file=args.motion_file)
 motion.set_interface(args.interface, robot.tracked_bodies)
 layout = XiLayout(robot, dev)
 normalize_xi = layout.normalize
@@ -269,6 +276,7 @@ if args.resume:
     # needs the full training state: last.pt. "pi" is the Polyak average with --pi_ema (what evaluation uses), so the
     # live policy comes from "pi_live" and the average from "pi_avg"
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
+    validate_control(ck, ROBOT_CONTROL)
     assert "opt_pi" in ck, f"--resume {args.resume}: no optimizer state (use last.pt)"
     check_pruned(ck.get("args", {}), what=args.resume)
     wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
@@ -291,6 +299,7 @@ if args.resume:
     del ck
 elif args.init:
     ck = torch.load(args.init, map_location=dev, weights_only=False)
+    validate_control(ck, ROBOT_CONTROL)
     assert "critic" in ck, f"--init {args.init}: no critic (use last.pt)"
     check_pruned(ck.get("args", {}), what=args.init)
     wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
@@ -316,10 +325,10 @@ def _wm_rollout(s, a, a_prev, xi):
     return tuple(torch.stack([P[i] for P in preds], 1) for i in range(6))  # (B, k, ...)
 
 
-_FEET = ("left_ankle_roll_link", "right_ankle_roll_link")
+_FEET = robot.feet
 FEET = [robot.tracked_bodies.index(b) for b in _FEET] if all(b in robot.tracked_bodies for b in _FEET) else []
 mdp.feet = FEET
-assert args.contact_reward == 0 or FEET, "--contact_reward needs foot bodies (g1)"
+assert args.contact_reward == 0 or FEET, "--contact_reward needs configured foot bodies"
 motion.set_ref_contact(FEET)
 
 
@@ -1033,7 +1042,7 @@ if args.pipeline:
     PIPE.sync_actor(args.warmup_steps)
 log_path = os.path.join(args.log_dir, "train_log.csv")
 log_f = open(log_path, "a")
-if start_it == 0:
+if os.path.getsize(log_path) == 0:
     log_f.write("iteration,wall_h,sim_steps,wm_loss,wm_err8,pi_loss,v_loss,imag_rew,pi_gradnorm,imag_survival,sim_rew,ep_len,ep_ret_norm,term_frac,it_per_s,lr"
                 ",pi_lr,pi_mult,nonfinite\n")  # fmt: skip
     log_f.flush()
@@ -1163,7 +1172,7 @@ for it in range(start_it, args.iterations):
         sd = pi_avg.module.state_dict() if pi_avg is not None else pi_l.state_dict()
         small = {"pi": {k: v.detach().to("cpu", copy=True) for k, v in sd.items()}, "iteration": it + 1,
                  "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
-                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
+                 "robot_control": ROBOT_CONTROL, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
         ckpt_wait()
         CKPT_PENDING.append(CKPT_POOL.submit(_save_atomic, small, path))
@@ -1172,13 +1181,13 @@ for it in range(start_it, args.iterations):
               "opt_pi": opt_pi.state_dict(), "opt_v": opt_v.state_dict(), "iteration": it + 1,
               "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
               "pi_avg": pi_avg.state_dict() if pi_avg is not None else None,
-              "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
+              "robot_control": ROBOT_CONTROL, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
         ck["ctrl"] = {"decay_at": DECAY_AT[0],
                       "env_bins": {"bin_G": env.bin_G.cpu(), "bin_fail": env.bin_fail.cpu(), "bin_w_avg": env.bin_w_avg.cpu()}}  # fmt: skip
         last = os.path.join(args.log_dir, "last.pt")
         torch.save(ck, last + ".tmp")
         os.replace(last + ".tmp", last)
-        small = {k: ck[k] for k in ("pi", "pi_live", "wm", "iteration", "wall_time", "sim_steps", "args", "saved_at")}
+        small = {k: ck[k] for k in ("pi", "pi_live", "wm", "iteration", "wall_time", "sim_steps", "args", "saved_at", "robot_control")}
         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
         torch.save(small, path + ".tmp")
         os.replace(path + ".tmp", path)
