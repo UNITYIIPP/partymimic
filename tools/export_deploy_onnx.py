@@ -39,8 +39,6 @@ from partymimic.rotations import mat_to_6d, mat_to_quat, mm3, mv3, quat_to_mat, 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deploy_yaml import build_blink, build_blink_robot, build_sparse5  # noqa: E402
 
-from partymimic.control import control_snapshot, validate_control
-
 SPEC = None  # the checkpoint's robot (load)
 P = 93  # proprio entries per step before the 6D relative orientation: 3 J + 6
 
@@ -53,15 +51,36 @@ def _qmul(a, b):
 
 
 class DeployBlink(nn.Module):
-    def __init__(self, pi: Policy, hist: int, K: int, J: int):
+    """``err`` = kp (--obs_err kp): the keypoint-error block (mdp.MDP.kp_err) from the newest proprio step (joint
+    encoders + default pose), the robot root orientation and the reference of frame f (ref_joint_pos / ref_root step 0;
+    keypoints by forward kinematics of the reference joints, as MotionLib's)."""
+
+    def __init__(self, pi: Policy, hist: int, K: int, J: int, err: str = "none", kin: Kinematics | None = None,
+                 kp: list[int] | None = None, q0: list[float] | None = None):  # fmt: skip
         super().__init__()
         self.pi, self.H, self.K, self.J = pi, hist, K, J
+        self.err, self.kin, self.kp = err, kin, kp
         self.register_buffer("conj", torch.tensor([1.0, -1.0, -1.0, -1.0]))
+        if err != "none":
+            self.register_buffer("q0", torch.tensor(q0, dtype=torch.float32))
 
-    def obs(self, proprio, root_quat_hist):
+    def kp_err(self, proprio, root_quat_hist, ref_joint_pos, ref_root):
+        jp = ref_joint_pos.view(self.K + 2, self.J)[0]
+        q = proprio.view(self.H, P)[-1, : self.J] + self.q0
+        R = quat_to_mat(root_quat_hist.view(self.H, 8)[-1, :4])
+        Rr = quat_to_mat(ref_root.view(self.K + 2, 7)[0, 3:])
+        bp, bR = self.kin.pose(mm3(yaw_mat(R).transpose(-1, -2), R), q, self.kp[1:])
+        rp, rR = self.kin.pose(mm3(yaw_mat(Rr).transpose(-1, -2), Rr), jp, self.kp[1:])
+        e_R = so3_log(mm3(rR.transpose(-1, -2), bR))
+        return torch.cat(((bp - rp)[1:].flatten(), e_R[1:].flatten(), e_R[0]))
+
+    def obs(self, proprio, root_quat_hist, ref_joint_pos=None, ref_root=None):
         qh = root_quat_hist.view(self.H, 8)
         rel = mat_to_6d(mm3(quat_to_mat(qh[:, :4]).transpose(-1, -2), quat_to_mat(qh[:, 4:])))
-        return torch.cat((proprio.view(self.H, P), rel), -1).unsqueeze(0)
+        o = (proprio.view(self.H, P), rel)
+        if self.err != "none":  # the policy reads the newest step's only
+            o += (self.kp_err(proprio, root_quat_hist, ref_joint_pos, ref_root).expand(self.H, -1),)
+        return torch.cat(o, -1).unsqueeze(0)
 
     def goal(self, ref_joint_pos, ref_root):
         K = self.K
@@ -80,7 +99,8 @@ class DeployBlink(nn.Module):
         return torch.cat((dp, rot, mv3(Rft, v), mv3(Rft, w), jp[1 : K + 1], qd * 0.1), -1).reshape(1, -1)
 
     def forward(self, proprio, root_quat_hist, ref_joint_pos, ref_root):
-        return self.pi(self.obs(proprio, root_quat_hist), self.goal(ref_joint_pos, ref_root)).reshape(self.J)
+        return self.pi(self.obs(proprio, root_quat_hist, ref_joint_pos, ref_root),
+                       self.goal(ref_joint_pos, ref_root)).reshape(self.J)
 
 
 class DeploySparse5(nn.Module):
@@ -129,7 +149,6 @@ def load(ckpt: str) -> tuple[Policy, dict]:
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     a = ck["args"]
     SPEC = get_robot(a.get("robot", "g1"))
-    validate_control(ck, control_snapshot(SPEC))
     P = 3 * len(SPEC.joint_names) + 6
     if a.get("wm_contact", 0) or a.get("pi_arch", "mlp") != "mlp":
         raise SystemExit("unsupported policy architecture")
@@ -140,7 +159,7 @@ def load(ckpt: str) -> tuple[Policy, dict]:
     from partymimic.motion import SPARSE5_FRAME
 
     goal_dim = K * SPARSE5_FRAME if interface == "sparse5" else K * (15 + 2 * J)
-    pi = Policy(obs_dim(J, interface), goal_dim, J, hist=a["hist"], enc_hidden=widths("enc_hidden", "2048,1024,512,256"),
+    pi = Policy(obs_dim(J, interface, a.get("obs_err", "none")), goal_dim, J, hist=a["hist"], enc_hidden=widths("enc_hidden", "2048,1024,512,256"),
                 dec_hidden=widths("dec_hidden", "2048,1024,512,256"), **policy_kwargs(a, SPEC))
     pi.load_state_dict(ck["pi"])
     return pi.eval(), a
@@ -224,7 +243,7 @@ def main() -> None:
     pi, args = load(a.ckpt)
     J, K, H = len(SPEC.joint_names), args["goal_frames"], args["hist"]
     sparse5 = args.get("interface", "joint") == "sparse5"
-    dep = None if sparse5 else DeployBlink(pi, H, K, J).eval()
+    err = args.get("obs_err", "none")
 
     kin = Kinematics(SPEC, "cpu")
     # a few clips of the training library are enough for the checks
@@ -242,22 +261,32 @@ def main() -> None:
         motion.set_interface("sparse5", SPEC.tracked_bodies)
         export_sparse5(pi, args, motion, kin, Path(a.out))
         return
+    motion.set_interface("joint", SPEC.tracked_bodies, err)
+    q0 = SPEC.default_joint_pos_list()
+    dep = DeployBlink(pi, H, K, J, err, kin, motion.kp, q0).eval()
+    mdp = MDP(kin, motion, torch.tensor(q0), 0)
     with torch.no_grad():
         geo = check_geometry(dep, motion)
-        # relative orientation and the full policy against Policy(obs_hist, MotionLib.goal)
+        # relative orientation, error block and the full policy against Policy(obs_hist, MotionLib.goal)
         g = torch.Generator().manual_seed(1)
-        c = min(3, len(motion.names) - 1)
-        f = int(motion.clip_start[c]) + min(100, int(motion.clip_len[c]) - 2)
-        jp, rr = window(motion, f, K)
-        prop = torch.randn(H * P, generator=g) * 0.3
-        rq = torch.nn.functional.normalize(torch.randn(H, 4, generator=g), dim=-1)
-        from partymimic.rotations import mat_to_quat
-
-        rq = torch.cat((rq, mat_to_quat(motion.root_R[f]).expand(H, 4)), -1).reshape(-1)
-        Rr = quat_to_mat(rq.view(H, 8)[:, :4])
-        rel_ref = mat_to_6d(mm3(Rr.transpose(-1, -2), motion.root_R[f]))
-        obs_ref = torch.cat((prop.view(H, P), rel_ref), -1).unsqueeze(0)
-        pol_err = (dep(prop, rq, jp, rr) - pi(obs_ref, motion.goal(torch.tensor([f]), K))[0]).abs().max().item()
+        err_max, pol_err = 0.0, 0.0
+        for i in range(20):
+            c = i % len(motion.names)
+            f = int(motion.clip_start[c]) + 1 + (37 * i) % max(int(motion.clip_len[c]) - K - 3, 1)
+            jp, rr = window(motion, f, K)
+            prop = torch.randn(H * P, generator=g) * 0.3
+            rq = torch.nn.functional.normalize(torch.randn(H, 4, generator=g), dim=-1)
+            rq = torch.cat((rq, mat_to_quat(motion.root_R[f]).expand(H, 4)), -1).reshape(-1)
+            Rr = quat_to_mat(rq.view(H, 8)[:, :4])
+            rel_ref = mat_to_6d(mm3(Rr.transpose(-1, -2), motion.root_R[f]))
+            o = (prop.view(H, P), rel_ref)
+            if err != "none":
+                q = prop.view(H, P)[-1, :J] + dep.q0
+                e_ref = mdp.kp_err(Rr[-1:], q[None], torch.tensor([f]))[0]
+                err_max = max(err_max, (dep.kp_err(prop, rq, jp, rr) - e_ref).abs().max().item())
+                o += (e_ref.expand(H, -1),)
+            obs_ref = torch.cat(o, -1).unsqueeze(0)
+            pol_err = max(pol_err, (dep(prop, rq, jp, rr) - pi(obs_ref, motion.goal(torch.tensor([f]), K))[0]).abs().max().item())
 
     inputs = (prop, rq, jp, rr)
     names = ["proprio", "root_quat_hist", "ref_joint_pos", "ref_root"]
@@ -269,7 +298,7 @@ def main() -> None:
     cfg = build_blink(out.name, K) if SPEC.name in ("g1", "g1mj") else build_blink_robot(out.name, K, SPEC)
     out.with_suffix(".yaml").write_text(__import__("yaml").safe_dump(cfg, sort_keys=False))
     print(json.dumps({"onnx": str(out), "robot": SPEC.name, "future": K, "history": H, "geometry_max_err": geo,
-                      "policy_vs_training_max_err": pol_err, "inputs": names}))
+                      "obs_err": err, "kp_err_max_err": err_max, "policy_vs_training_max_err": pol_err, "inputs": names}))
 
 
 if __name__ == "__main__":

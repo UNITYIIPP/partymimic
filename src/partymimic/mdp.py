@@ -20,20 +20,20 @@ def state_dim(J: int) -> int:
     return 3 + 4 + 3 + 3 + J + J
 
 
-def obs_err_dim(interface: str = "joint") -> int:
-    """Size of the decoder-only block at the end of the observation (--interface sparse5: MDP.kp_err)."""
-    return SPARSE5_ERR if interface == "sparse5" else 0
+def obs_err_dim(interface: str = "joint", obs_err: str = "none") -> int:
+    """Size of the decoder-only block at the end of the observation (--interface sparse5 / --obs_err kp: MDP.kp_err)."""
+    return SPARSE5_ERR if interface == "sparse5" or obs_err == "kp" else 0
 
 
-def obs_dim(J: int, interface: str = "joint") -> int:
-    return J + J + 3 + 3 + J + 6 + obs_err_dim(interface)
+def obs_dim(J: int, interface: str = "joint", obs_err: str = "none") -> int:
+    return J + J + 3 + 3 + J + 6 + obs_err_dim(interface, obs_err)
 
 
-def obs_scale(J: int, interface: str = "joint") -> torch.Tensor:
+def obs_scale(J: int, interface: str = "joint", obs_err: str = "none") -> torch.Tensor:
     # normalization of the obs before the policy (qd and angular velocity are large)
     return torch.cat(
         (torch.ones(J), torch.full((J,), 0.1), torch.full((3,), 0.25), torch.ones(3), torch.ones(J), torch.ones(6),
-         torch.ones(obs_err_dim(interface)))  # fmt: skip
+         torch.ones(obs_err_dim(interface, obs_err)))  # fmt: skip
     )
 
 
@@ -53,6 +53,9 @@ class RewardCfg:
     soft_limit_factor: float = 0.9
     term_height: float = 0.25
     term_tilt: float = 0.8
+    w_wrist: float = 0.0
+    wrist_std: float = 0.05
+    """--wrist_kernel: extra position kernel w_wrist exp(-e / wrist_std^2) on the wrists (e: mean squared error)."""
 
 
 def flatten_state(S) -> torch.Tensor:
@@ -92,7 +95,6 @@ class MDP:
     def __init__(self, kin: Kinematics, motion: MotionLib, default_q: torch.Tensor, xi_dim: int,
                  sensing: SensingCfg = SensingCfg(), cfg: RewardCfg = RewardCfg()):  # fmt: skip
         self.kin, self.motion, self.cfg = kin, motion, cfg
-        self.contact_height = kin.robot.contact_height
         self.default_q = default_q
         mid, half = (kin.q_lo + kin.q_hi) / 2, (kin.q_hi - kin.q_lo) / 2
         self.soft_lo, self.soft_hi = mid - half * cfg.soft_limit_factor, mid + half * cfg.soft_limit_factor
@@ -100,10 +102,14 @@ class MDP:
         J = default_q.shape[0]
         self.num_j = J
         self.interface = motion.interface  # MotionLib.set_interface before the MDP is built
-        self.obs_dim, self.xi_dim = obs_dim(J, self.interface), xi_dim
+        self.obs_err = motion.obs_err
+        self.obs_dim, self.xi_dim = obs_dim(J, self.interface, self.obs_err), xi_dim
         self.critic_extra = J + len(kin.tracked_idx) * 3 + 3 + 6 + self.xi_dim
-        self.obs_noise = obs_noise(sensing, J, self.interface).to(dev)
-        self.obs_scale = obs_scale(J, self.interface).to(dev)
+        self.obs_noise = obs_noise(sensing, J, self.interface, self.obs_err).to(dev)
+        self.obs_scale = obs_scale(J, self.interface, self.obs_err).to(dev)
+        self.contact_height = kin.robot.contact_height
+        self.wrists = [kin.robot.tracked_bodies.index(n) for n in kin.robot.wrists]
+        assert cfg.w_wrist == 0 or len(self.wrists) == 2, self.wrists
         # InstantTrack contact reward (training only): tracked-body indices of the feet, set by the trainer
         self.feet: list[int] = []
 
@@ -116,7 +122,7 @@ class MDP:
         g_b = -R[..., 2, :]  # R^T (0,0,-1)
         rel = mat_to_6d(mm3(Rt, self.motion.root_R[f]))
         o = (q - self.default_q - dq0, qd, mv3(Rt, w), g_b, a_prev, rel)
-        if self.interface == "sparse5":
+        if self.interface == "sparse5" or self.obs_err == "kp":
             o += (self.kp_err(R, q - dq0, f),)
         return torch.cat(o, -1)
 
@@ -168,13 +174,16 @@ class MDP:
             )
 
         r_track = track(c)
+        if c.w_wrist > 0:
+            e_wr = ((ref_bp - bp)[..., self.wrists, :] ** 2).sum(-1).mean(-1)
+            r_track = r_track + c.w_wrist * torch.exp(-e_wr / c.wrist_std**2)
         r_rate = ((a - a_prev) ** 2).sum(-1)
         r_lim = (torch.relu(q - self.soft_hi) + torch.relu(self.soft_lo - q)).sum(-1)
         r = (r_track + c.w_action_rate * r_rate + c.w_joint_limit * r_lim) * CONTROL_DT
         if w_contact > 0:
             fz, rz = bp[..., self.feet, 2], m.body_p[f][..., self.feet, 2]
             c_sim = torch.sigmoid((self.contact_height - fz) / 0.005)
-            rc = getattr(m, "ref_contact", None)  # clip-relative labels, otherwise the robot's height threshold
+            rc = getattr(m, "ref_contact", None)  # MotionLib.set_ref_contact (set by the trainer), else the fixed 4.5 cm
             c_ref = rc[f] if rc is not None else (rz < self.contact_height).float()
             slip = (bv[..., self.feet, :2] ** 2).sum(-1)
             r_contact = (1 - (c_sim - c_ref) ** 2) + c_ref * torch.exp(-slip / 0.3**2)

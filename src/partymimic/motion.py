@@ -28,6 +28,8 @@ SPARSE5_FRAME = 9 + 6 + 4 * 9
 # sparse5 observation block (mdp.MDP.kp_err): wrist / ankle position (4 x 3) and orientation (4 x 3, so3_log) errors and
 # the head orientation error (3) of the robot against reference frame f, both relative to their own pelvis heading frame
 SPARSE5_ERR = 4 * 3 + 4 * 3 + 3
+# --obs_err (joint interface only): "kp" adds sparse5's keypoint-error block for the decoder
+OBS_ERRS = ("none", "kp")
 
 
 def sparse5_bodies(tracked: tuple[str, ...]) -> list[int]:
@@ -63,10 +65,6 @@ class MotionLib:
             p, quat, j = (torch.tensor(x, dtype=torch.float32) for x in (p, quat, j))
             # resample to 50 Hz
             T_src = p.shape[0]
-            if abs(src_fps - 1 / CONTROL_DT) < 1e-9:
-                ps.append(p), qs.append(quat), js.append(j)
-                lens.append(T_src)
-                continue
             dur = (T_src - 1) / src_fps
             n = int(np.floor(dur / CONTROL_DT)) + 1
             t = torch.arange(n, dtype=torch.float32) * CONTROL_DT * src_fps
@@ -77,8 +75,6 @@ class MotionLib:
             quat = quat_slerp(quat[i0], quat[i0 + 1], a)
             ps.append(p), qs.append(quat), js.append(j)
             lens.append(n)
-        if not lens:
-            raise ValueError('No motion clips found')
         self.clip_len = torch.tensor(lens, device=device)
         self.clip_start = torch.cumsum(torch.cat((torch.zeros(1, dtype=torch.long), torch.tensor(lens[:-1], dtype=torch.long))), 0).to(device)  # dtype: one clip gives an empty (float) tensor
         self.clip_end = self.clip_start + self.clip_len - 1  # last valid frame (inclusive)
@@ -169,6 +165,8 @@ class MotionLib:
         loader = robot.load_motion
         if not files:
             files, loader = sorted(glob.glob(os.path.join(path, '*.npz'))), load_npz
+        if not files:
+            raise FileNotFoundError(f"No motions in {path}; for an EVT archive use --motion_file")
         return MotionLib(files[:max_clips], kin, device, loader)
 
     @staticmethod
@@ -200,12 +198,14 @@ class MotionLib:
         self.ref_contact = ((z < floor + margin) & (vh < vmax)).float()
 
     interface = "joint"
-    kp: list[int] | None = None  # sparse5: tracked-body indices of the keypoints (sparse5_bodies)
+    obs_err = "none"  # --obs_err: error block of the joint interface (mdp.obs_err_dim)
+    kp: list[int] | None = None  # sparse5 / --obs_err kp: tracked-body indices of the keypoints (sparse5_bodies)
 
-    def set_interface(self, interface: str, tracked: tuple[str, ...]) -> None:
+    def set_interface(self, interface: str, tracked: tuple[str, ...], obs_err: str = "none") -> None:
         assert interface in INTERFACES, interface
-        self.interface = interface
-        if interface == "sparse5":
+        assert obs_err in OBS_ERRS and (obs_err == "none" or interface == "joint"), (interface, obs_err)
+        self.interface, self.obs_err = interface, obs_err
+        if interface == "sparse5" or obs_err == "kp":
             self.kp = ([tracked.index(n) for n in (tracked[0], *self.sparse_bodies)]
                        if self.sparse_bodies else sparse5_bodies(tuple(tracked)))
             self.kp_p, self.kp_R = self.body_p[:, self.kp].contiguous(), self.body_R[:, self.kp].contiguous()

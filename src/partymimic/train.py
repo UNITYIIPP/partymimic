@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import json
 import math
 import os
@@ -15,9 +16,9 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ON = argparse.BooleanOptionalAction
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--robot", type=str, default="g1mj", help="robot package under partymimic/ (g1mj, rp1, g1, evt)")
+parser.add_argument("--robot", type=str, default="g1mj", help="robot package under partymimic/ (g1mj, rp1, g1, evt, evt_nominal)")
 motion_source = parser.add_mutually_exclusive_group()
-motion_source.add_argument("--motion_file", type=str, default=None, help="packed motion archive (EVT compact_v1)")
+motion_source.add_argument("--motion_file", help="packed motion archive for robots with an archive loader")
 motion_source.add_argument("--motion_dir", type=str, default=None, help="defaults to the robot's motion directory")
 parser.add_argument("--log_dir", type=str, default=os.path.join(REPO, "logs", "run"))
 parser.add_argument("--seed", type=int, default=0)
@@ -45,6 +46,16 @@ parser.add_argument("--interface", type=str, default="joint", choices=("joint", 
                     help="reference interface of the policy (motion.INTERFACES): joint = root motion + joint positions / "
                          "velocities per goal frame; sparse5 = pelvis / head / wrist / ankle poses per goal frame and an "
                          "explicit keypoint-error block for the decoder, with --kp_skip and --kp_aux on by default")
+parser.add_argument("--obs_err", type=str, default="none", choices=("none", "kp"),
+                    help="joint interface: kp = sparse5's wrist / ankle / head error block against the current reference "
+                         "frame as a decoder input (newest step only, as sparse5's); computed from the deployed inputs")
+parser.add_argument("--wrist_kernel", type=float, default=0.0,
+                    help="weight of an extra wrist position kernel in the tracking reward (0 = off)")
+parser.add_argument("--wrist_std_mult", type=float, default=0.5,
+                    help="--wrist_kernel: its std as this x the body position std (after --std_scale)")
+parser.add_argument("--wrist_payload", type=float, default=0.0,
+                    help="hidden payload randomization: up to this many kg at each wrist, once per env (0 = off)")
+parser.add_argument("--payload_p0", type=float, default=0.25, help="--wrist_payload: share of envs without payload")
 parser.add_argument("--kp_skip", action=ON, default=None,
                     help="sparse5 (default on): reference-action skip on an estimated reference, a = kp2q(goal) / alpha + dec(...), "
                          "kp2q an MLP from the goal to q_ref(f+1) - q0 fit to the motion library before training, frozen")
@@ -58,7 +69,7 @@ parser.add_argument("--lam", type=float, default=0.95)
 parser.add_argument("--action_noise", type=float, default=0.1)
 parser.add_argument("--amp", type=str, default="bf16", choices=["none", "bf16"], help="autocast dtype for MLP matmuls")
 # ---- reward and resets ----
-parser.add_argument("--std_scale", type=float, default=0.35,
+parser.add_argument("--std_scale", type=float, default=0.6,
                     help="training reward only: scale of the body / root position and orientation kernel widths "
                          "(evaluation keeps SuperMimic's reward)")
 parser.add_argument("--contact_reward", type=float, default=0.25,
@@ -69,6 +80,43 @@ parser.add_argument("--div_k", type=int, default=24,
                     help="reset sampling: the uniform share by motion diversity, k-means clusters of the bins' motion "
                          "features with mass ~ (bins in the cluster)^--div_tau (0 = by duration)")
 parser.add_argument("--div_tau", type=float, default=0.0)
+# ---- adaptive clip allocation (off by default)
+parser.add_argument("--reset_alloc", type=str, default="none", choices=("none", "lp"),
+                    help="lp: a share --alloc_lambda of the reset distribution follows the cluster allocation of spot.Cover "
+                         "(the deficit of each motion cluster x its --motion_prior score)")
+parser.add_argument("--start_alloc", type=str, default="none", choices=("none", "lp"),
+                    help="lp: imagination starts re-weighted to the reset shares (target share / data share per group)")
+parser.add_argument("--alloc_lambda", type=float, default=0.5)
+parser.add_argument("--alloc_last", type=int, default=0, choices=(0, 1),
+                    help="1: the adaptive share is mixed in after the release distribution and --fail_reset instead of "
+                         "replacing its return-prioritized part")
+parser.add_argument("--alloc_seg", type=int, default=16, help="allocation groups: clip segments of at most this many bins")
+parser.add_argument("--motion_prior", type=str, default="",
+                    help="per-clip motion features (tools/motion_prior.py): feasibility and root angular speed of each clip")
+parser.add_argument("--cover_clusters", type=int, default=128, help="k-means clusters of the clips (allocation units)")
+parser.add_argument("--cover_m", type=int, default=8, help="clusters sharing the adaptive share")
+parser.add_argument("--cover_cap", type=float, default=0.2, help="cap per cluster, share of the adaptive part")
+parser.add_argument("--cover_maint", type=float, default=0.5, help="kept share, times the decaying peak share")
+parser.add_argument("--cover_decay", type=float, default=0.995, help="peak share decay per period (250 iterations)")
+parser.add_argument("--cover_win", type=int, default=3000,
+                    help="a cluster that held share this many iterations without beating the library's progress loses it")
+parser.add_argument("--cover_start", type=int, default=0, help="first allocation")
+parser.add_argument("--cover_prior", type=int, default=1, choices=(0, 1),
+                    help="1 = feasible x angular-speed score of --motion_prior, 0 = feasible only")
+# ---- long-training stability (all off by default)
+parser.add_argument("--v_clip", type=float, default=0.0,
+                    help="clip of the critic's value to [-c, c] wherever it is used (bootstrap, GAE targets, critic loss, "
+                         "SIL baseline): no gradient beyond the largest return; 0 = off (the largest return is 0.1 / (1 - gamma) = 10)")
+parser.add_argument("--v_clip_raw", action="store_true",
+                    help="with --v_clip, as official SuperMimic: the GAE targets are computed from the unclipped value "
+                         "and then clipped, and the critic loss is on the unclipped output, so an output beyond the "
+                         "clip is still pulled back (the bootstrap and the other uses stay clipped)")
+parser.add_argument("--wm_guard", type=float, default=0.0,
+                    help="skip a world-model update whose loss exceeds this x its running mean (0 = off)")
+parser.add_argument("--v_guard", type=float, default=0.0,
+                    help="skip a critic minibatch step whose loss exceeds this x its running mean (0 = off)")
+parser.add_argument("--ckpt_at", type=str, default="",
+                    help="comma-separated iterations with an extra policy checkpoint (evaluation along a long run)")
 parser.add_argument("--ref_enc", type=str, default="mlp", choices=("mlp", "xattn"),
                     help="motion encoder: mlp = enc(goal); xattn = dynamics-conditioned cross-attention, a causal "
                          "Transformer over the observation history queries the goal frames (RGMT)")
@@ -97,6 +145,8 @@ parser.add_argument("--pi_opt", type=str, default="muon", choices=["adam", "muon
                          "decoder at Adam's update RMS (same lr), Adam on vectors")
 parser.add_argument("--pi_muon_io", action=ON, default=True,
                     help="--pi_opt muon on the first and last Linear of the policy MLPs too (else Adam there)")
+parser.add_argument("--muon_wd", type=float, default=0.1,
+                    help="decoupled weight decay on Muon groups (torch.optim.Muon default; 0 disables)")
 parser.add_argument("--pi_beta1", type=float, default=0.9, help="Adam beta1 of the policy")
 parser.add_argument("--pi_clip_value", type=float, default=0.1, help="element-wise policy gradient clip after the norm clip (<= 0: off)")
 parser.add_argument("--pi_ema", type=float, default=0.995,
@@ -112,6 +162,12 @@ parser.add_argument("--critic_minibatches", type=int, default=4)
 parser.add_argument("--v_gcons", type=float, default=0.5,
                     help="critic: weight of the value-gradient consistency loss, grad_s V(S_k) fit to the BPTT gradient of "
                          "the imagined return from S_k (k = 1..H-1, per-coordinate one-step-change scales; 0 = off)")
+parser.add_argument("--gc_den_floor", type=float, default=0.0,
+                    help="--v_gcons: after --gc_den_ref_it, floor of the relative error's denominator (the mean squared "
+                         "target gradient) at this fraction of its average before (0 = off): once the policy has converged "
+                         "the targets shrink and the relative error weighs their noise ever more")
+parser.add_argument("--gc_den_ref_it", type=int, default=12000,
+                    help="--gc_den_floor: iterations over which the reference denominator is averaged (then frozen)")
 parser.add_argument("--v_gcons_n", type=int, default=4096, help="--v_gcons: states per critic minibatch")
 parser.add_argument("--v_gcons_epochs", type=int, default=1, help="--v_gcons: in the minibatches of the first this many epochs")
 # ---- learning rates ----
@@ -133,6 +189,7 @@ if args.kp_aux is None:
     args.kp_aux = 1.0 if args.interface == "sparse5" else 0.0
 assert args.interface == "sparse5" or not (args.kp_skip or args.kp_aux > 0), "--kp_skip / --kp_aux: --interface sparse5 only"
 assert not (args.resume and args.init), "--resume or --init"
+assert not args.v_clip_raw or args.v_clip > 0, "--v_clip_raw needs --v_clip"
 
 import torch
 import torch.nn as nn
@@ -150,7 +207,6 @@ from partymimic.mirror import Mirror
 from partymimic.objective import actor_objective
 from partymimic.mdp import flatten_state
 from partymimic.robot import get_robot
-from partymimic.control import control_snapshot, validate_control
 from partymimic.sensing import ObsPipeline
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -160,23 +216,23 @@ networks.AMP_DTYPE = torch.bfloat16 if args.amp == "bf16" else None
 dev = "cuda:0"
 ldev = "cuda:1" if args.pipeline else dev  # the policy learner's GPU
 os.makedirs(args.log_dir, exist_ok=True)
-if args.resume and not (args.motion_dir or args.motion_file):
-    _saved_args = torch.load(args.resume, map_location="cpu", weights_only=False)["args"]
-    args.motion_dir, args.motion_file = _saved_args.get("motion_dir"), _saved_args.get("motion_file")
 json.dump(vars(args), open(os.path.join(args.log_dir, "args.json"), "w"), indent=2)
 
 robot = get_robot(args.robot)
-ROBOT_CONTROL = control_snapshot(robot)
+if args.wrist_payload > 0:
+    robot = dataclasses.replace(robot, dr=dataclasses.replace(robot.dr, wrist_payload=args.wrist_payload,
+                                                              payload_p0=args.payload_p0))
 J = robot.num_joints
 kin = Kinematics(robot, dev)
 motion = MotionLib.from_source(robot, kin, dev, motion_dir=args.motion_dir, motion_file=args.motion_file)
-motion.set_interface(args.interface, robot.tracked_bodies)
+motion.set_interface(args.interface, robot.tracked_bodies, args.obs_err)
 layout = XiLayout(robot, dev)
 normalize_xi = layout.normalize
 _rc, _s = RewardCfg(), args.std_scale
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), layout.dim, robot.sensing,
           RewardCfg(body_pos_std=_rc.body_pos_std * _s, body_ori_std=_rc.body_ori_std * _s,
-                    root_pos_std=_rc.root_pos_std * _s, root_ori_std=_rc.root_ori_std * _s))
+                    root_pos_std=_rc.root_pos_std * _s, root_ori_std=_rc.root_ori_std * _s,
+                    w_wrist=args.wrist_kernel, wrist_std=_rc.body_pos_std * _s * args.wrist_std_mult))
 pipe = ObsPipeline(robot, mdp, layout, dev, PHYSICS_DT)
 # every update and the collection step run as CUDA graphs: the sensing chain must be stateless
 assert not pipe.stateful, f"{args.robot}: stateful sensing (filters, delays) is not supported"
@@ -237,12 +293,13 @@ adam_kw = lambda d: {"fused": True, "capturable": True, "lr": torch.tensor(args.
 from partymimic.optim import FlatAdam, MuonAdam
 
 if args.wm_opt == "muon":
-    opt_wm = MuonAdam(wm, [wm.net], lr=args.lr, betas=(0.9, 0.999), fused=True, capturable=True, flat_adam=True)
+    opt_wm = MuonAdam(wm, [wm.net], lr=args.lr, betas=(0.9, 0.999), fused=True, capturable=True, flat_adam=True,
+                      weight_decay=args.muon_wd)
 else:
     opt_wm = torch.optim.Adam(wm.parameters(), **adam_kw(dev))
 if args.pi_opt == "muon":
     opt_pi = MuonAdam(pi_l, [pi_l.enc, pi_l.dec], lr=args.lr, betas=(args.pi_beta1, 0.95), fused=True, capturable=True,
-                      io=args.pi_muon_io)
+                      io=args.pi_muon_io, weight_decay=args.muon_wd)
 else:
     opt_pi = torch.optim.Adam(pi_l.parameters(), betas=(args.pi_beta1, 0.95), **adam_kw(ldev))
 NONFINITE = torch.zeros((), dtype=torch.long, device=ldev)  # skipped non-finite policy updates
@@ -252,8 +309,15 @@ opt_v = FlatAdam(critic.parameters(), args.lr)
 
 GC_ON = args.v_gcons > 0
 SIL_DIAG = torch.zeros(2, device=ldev)  # --sil: share of starts with G > V, self-imitation loss
-GC_DIAG = torch.zeros(2, device=ldev)  # --v_gcons: relative squared error of grad_s V, cosine to the target
+GC_DIAG = torch.zeros(3, device=ldev)  # --v_gcons: relative squared error of grad_s V, cosine, mean squared target
+GC_DEN_REF = torch.zeros((), device=ldev)  # --gc_den_floor: average of the mean squared target before --gc_den_ref_it
+GC_REF_ON = torch.ones((), device=ldev)  # 1 while that average is taken
 KP_DIAG = torch.zeros(1, device=ldev)  # --kp_aux: RMS error (rad) of the latent's joint-position prediction
+# long-training guards (inside the graphs): running means of the world-model / critic losses (--wm_guard / --v_guard),
+# skipped steps since the last log line, and the share of the critic's unclipped outputs beyond --v_clip (EMA)
+WM_EMA, WM_SKIP = torch.zeros((), device=dev), torch.zeros((), device=dev)
+V_EMA, V_SKIP = torch.zeros((), device=ldev), torch.zeros((), device=ldev)
+V_SAT = torch.zeros((), device=ldev)
 ALPHA = torch.tensor(robot.action_scale_list(), device=ldev)  # action units -> joint-setpoint radians
 
 start_it, wall_offset, sim_steps = 0, 0.0, 0
@@ -276,8 +340,9 @@ if args.resume:
     # needs the full training state: last.pt. "pi" is the Polyak average with --pi_ema (what evaluation uses), so the
     # live policy comes from "pi_live" and the average from "pi_avg"
     ck = torch.load(args.resume, map_location=dev, weights_only=False)
-    validate_control(ck, ROBOT_CONTROL)
     assert "opt_pi" in ck, f"--resume {args.resume}: no optimizer state (use last.pt)"
+    if robot.control_files and ck["args"].get("robot") != robot.name:
+        raise ValueError(f"Checkpoint robot differs from {robot.name}")
     check_pruned(ck.get("args", {}), what=args.resume)
     wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
     pi_l.load_state_dict(ck.get("pi_live", ck["pi"]))
@@ -299,10 +364,17 @@ if args.resume:
     del ck
 elif args.init:
     ck = torch.load(args.init, map_location=dev, weights_only=False)
-    validate_control(ck, ROBOT_CONTROL)
     assert "critic" in ck, f"--init {args.init}: no critic (use last.pt)"
+    if robot.control_files and ck["args"].get("robot") != robot.name:
+        raise ValueError(f"Checkpoint robot differs from {robot.name}")
     check_pruned(ck.get("args", {}), what=args.init)
-    wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
+    try:
+        wm.load_state_dict(ck["wm"]), pi.load_state_dict(ck.get("pi_live", ck["pi"])), critic.load_state_dict(ck["critic"])
+    except RuntimeError as e:
+        skip = {"log_dir", "motion_dir", "motion_prior", "init", "resume", "iterations", "seed", "ckpt_every", "ckpt_at"}
+        diff = {k: v for k, v in ck.get("args", {}).items() if k not in skip and k in vars(args) and getattr(args, k) != v}
+        raise SystemExit(f"--init {args.init}: the networks differ from this run's ({str(e).splitlines()[0]}); "
+                         f"options of the checkpoint that differ from this run: {diff}") from e
     pi_l.load_state_dict(ck.get("pi_live", ck["pi"]))
     if pi_avg is not None:
         pi_avg.module.load_state_dict(ck["pi"])
@@ -328,7 +400,7 @@ def _wm_rollout(s, a, a_prev, xi):
 _FEET = robot.feet
 FEET = [robot.tracked_bodies.index(b) for b in _FEET] if all(b in robot.tracked_bodies for b in _FEET) else []
 mdp.feet = FEET
-assert args.contact_reward == 0 or FEET, "--contact_reward needs configured foot bodies"
+assert args.contact_reward == 0 or FEET, "--contact_reward needs foot bodies (g1)"
 motion.set_ref_contact(FEET)
 
 
@@ -373,8 +445,19 @@ def _gae_targets(V, rews, dones):
     return torch.stack(targets[::-1])
 
 
+def V(X):
+    """The critic's value, clipped with --v_clip."""
+    return _clip_v(critic(X))
+
+
+def _clip_v(v):
+    return v.clamp(-args.v_clip, args.v_clip) if args.v_clip > 0 else v
+
+
 def _critic_loss(X, Y):
-    return ((critic(X) - Y) ** 2).mean()
+    if args.v_clip_raw:
+        return ((critic(X) - Y) ** 2).mean()
+    return ((V(X) - Y) ** 2).mean()
 
 
 @torch.no_grad()
@@ -392,7 +475,7 @@ def real_returns(s, xi_n):
     disc = args.gamma ** torch.arange(HZ, device=dev, dtype=torch.float32).unsqueeze(-1)
     f_end = w["f"][-1] + 1
     X_end = critic_input_c(unflatten_state(w["s1"][-1]), f_end, xi_n, motion.goal(f_end, K))
-    G = (disc * c_t * r.view(HZ, B)).sum(0) + args.gamma**HZ * alive[-1] * critic(X_end)
+    G = (disc * c_t * r.view(HZ, B)).sum(0) + args.gamma**HZ * alive[-1] * V(X_end)
     return G, ok.float(), w["a"][0]
 
 
@@ -446,8 +529,18 @@ def wm_update():
     loss, e_last = wm_err(S_hat, w["s1"], w["mask"])
     opt_wm.zero_grad(set_to_none=True)
     loss.backward()
-    nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
-    opt_wm.step()
+    gn = nn.utils.clip_grad_norm_(wm.parameters(), 1.0)
+    if args.wm_guard > 0:  # skip an update whose loss is far above its running mean (or not finite)
+        l = loss.detach()
+        ok = torch.isfinite(l) & torch.isfinite(gn) & ((WM_EMA <= 0) | (l < args.wm_guard * WM_EMA))
+        WM_SKIP.add_((~ok).float())
+        WM_EMA.copy_(torch.where(ok, torch.where(WM_EMA > 0, 0.99 * WM_EMA + 0.01 * l, l), WM_EMA))
+        for p in wm.parameters():
+            if p.grad is not None:
+                p.grad.copy_(torch.where(ok, p.grad, 0.0))
+        opt_wm.step(ok=ok)
+    else:
+        opt_wm.step()
     m = w["mask"][:, -1]
     return loss.detach() / args.wm_window, (e_last.detach() * m).sum() / m.sum().clamp(min=1)
 
@@ -460,10 +553,18 @@ def sample_valid_starts(B: int):
     # fixed-size selection without reading the valid count on the host: stable-sort the valid candidates first (only
     # starts within H frames of a clip end are invalid, < 1% of a large library); fewer than B valid ones (a library of
     # a few short clips) are repeated cyclically
-    s, h = buffer.sample_starts(2 * B, Hh)
+    lp = args.start_alloc == "lp"
+    s, h = buffer.sample_starts((4 if lp else 2) * B, Hh)
     f = s["f"]
     ok = f + HZ <= motion.clip_end[motion.clip_id[f]]
-    order = torch.sort((~ok).to(torch.uint8), stable=True).indices
+    if lp:  # B starts without replacement, probability ~ target share / data share of their group (Gumbel top-k)
+        gum = -torch.log(-torch.log(torch.rand(f.shape, device=f.device).clamp(1e-20, 1 - 1e-7)))
+        key = torch.where(ok, ALLOC.start_weight(f).log() + gum, torch.full_like(gum, -1e9))
+        idx = torch.topk(key, B).indices
+        idx = torch.where(ok[idx], idx, idx[0])
+        return {k: v[idx] for k, v in s.items()}, {k: v[idx] for k, v in h.items()}
+    prio = (~ok).to(torch.uint8)
+    order = torch.sort(prio, stable=True).indices
     j = torch.arange(B, device=f.device)
     nv = ok.sum().clamp(min=1)
     idx = order[torch.where(j < nv, j, j % nv)]
@@ -591,7 +692,14 @@ def gcons_loss(S, f, xi_n, g, T, m, scale):
     R = S[1].detach()
     zt = _gc_coords(T, R, scale)
     diff = _gc_coords(gS, R, scale) - zt
-    err = (m * (diff**2).sum(-1)).sum() / (m * (zt**2).sum(-1)).sum().clamp(min=1e-12)
+    msum = m.sum().clamp(min=1)
+    den_raw = (m * (zt**2).sum(-1)).sum() / msum
+    den = den_raw
+    if args.gc_den_floor > 0:
+        d = den_raw.detach()
+        GC_DEN_REF.copy_(torch.where(GC_REF_ON > 0, torch.where(GC_DEN_REF > 0, 0.99 * GC_DEN_REF + 0.01 * d, d), GC_DEN_REF))
+        den = torch.where(GC_REF_ON > 0, den_raw, torch.maximum(den_raw, args.gc_den_floor * GC_DEN_REF))
+    err = (m * (diff**2).sum(-1)).sum() / msum / den.clamp(min=1e-12)
     e = torch.autograd.grad(err, gS)
     with torch.no_grad():
         eps = 0.05 / _gc_coords(e, R, 1 / scale).norm(dim=-1).clamp(min=1e-12)
@@ -599,7 +707,7 @@ def gcons_loss(S, f, xi_n, g, T, m, scale):
         Je = (critic_input_c(shift(1), f, xi_n, g) - critic_input_c(shift(-1), f, xi_n, g)) / (2 * eps.unsqueeze(-1))
         zg = diff + zt
         cos = (m * (zg * zt).sum(-1) / (zg.norm(dim=-1) * zt.norm(dim=-1)).clamp(min=1e-12)).sum() / m.sum().clamp(min=1)
-    return (u * Je).sum(), err.detach(), cos
+    return (u * Je).sum(), err.detach(), cos, den_raw.detach()
 
 
 CS = {}  # the policy step's imagined windows for the critic fit
@@ -631,7 +739,7 @@ def policy_step():
     A_flat, Ap_flat = flat(As), flat(Aps)
     r, d = reward_term(S_all, f_all, A_flat, Ap_flat)
     r, d = r.view(HZ, B), d.view(HZ, B)
-    v_boot = critic(critic_input_c(S, f, xi_n, g))
+    v_boot = V(critic_input_c(S, f, xi_n, g))
     # survival products as a loop (cumprod's backward reads the host)
     J, c_t, c = actor_objective(r, d, v_boot, args.gamma, loop_cumprod=True)
     r_sum = (c_t * r).detach().sum(0)
@@ -640,7 +748,7 @@ def policy_step():
     if args.sil > 0:
         G_rec, rec_ok, a_rec = real_returns(s, xi_n)
         with torch.no_grad():
-            A = (G_rec - critic(critic_input_c(S0, s["f"], xi_n, g0))) * rec_ok
+            A = (G_rec - V(critic_input_c(S0, s["f"], xi_n, g0))) * rec_ok
             SIL_DIAG[0].copy_((A > 0).float().sum() / rec_ok.sum().clamp(min=1))
             wgt = torch.clamp(A / (A.abs().mean() + 1e-6), 0, args.sil_wmax)
         l_sil = (wgt * (((As[0] - a_rec) * ALPHA) ** 2).mean(-1)).mean()
@@ -688,7 +796,13 @@ def critic_fit():
         X = critic_input_c(S_c, f_c, xi_c, g_c).view(HZ + 1, B, -1)
     critic.norm.update(X)
     with torch.no_grad():
-        targets = gae_targets_c(critic(X), rews, dones)  # (H, B)
+        if args.v_clip > 0:
+            v_raw = critic(X)
+            V_SAT.mul_(0.98).add_(0.02 * (v_raw.abs() > args.v_clip).float().mean())
+        if args.v_clip_raw:
+            targets = _clip_v(gae_targets_c(v_raw, rews, dones))
+        else:
+            targets = gae_targets_c(V(X), rews, dones)  # (H, B)
     Xf, Yf = X[:-1].reshape(-1, X.shape[-1]), targets.reshape(-1)
     n = Xf.shape[0]
     mb = n // args.critic_minibatches
@@ -705,14 +819,22 @@ def critic_fit():
             v_tot = v_loss
             if GC_ON and ep < args.v_gcons_epochs:
                 gi = torch.randint(0, gc_m.shape[0], (min(args.v_gcons_n, gc_m.shape[0]),), device=dev)
-                sur, gc_err, gc_cos = gcons_loss(tuple(x[gi] for x in gc_S), gc_f[gi], gc_xi[gi], gc_g[gi],
+                sur, gc_err, gc_cos, gc_den = gcons_loss(tuple(x[gi] for x in gc_S), gc_f[gi], gc_xi[gi], gc_g[gi],
                                                  tuple(x[gi] for x in gc_T), gc_m[gi], gc_scale)
                 v_tot = v_tot + args.v_gcons * sur
-                GC_DIAG[0].copy_(gc_err), GC_DIAG[1].copy_(gc_cos)
+                GC_DIAG[0].copy_(gc_err), GC_DIAG[1].copy_(gc_cos), GC_DIAG[2].copy_(gc_den)
             opt_v.zero_grad(set_to_none=True)
             v_tot.backward()
-            nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
-            opt_v.step()
+            vgn = nn.utils.clip_grad_norm_(critic.parameters(), 1.0)
+            if args.v_guard > 0:  # skip a minibatch step whose loss is far above its running mean (or not finite)
+                l = v_loss.detach()
+                ok = torch.isfinite(l) & torch.isfinite(vgn) & ((V_EMA <= 0) | (l < args.v_guard * V_EMA))
+                V_SKIP.add_((~ok).float())
+                V_EMA.copy_(torch.where(ok, torch.where(V_EMA > 0, 0.99 * V_EMA + 0.01 * l, l), V_EMA))
+                opt_v.gflat.copy_(torch.where(ok, opt_v.gflat, 0.0))
+                opt_v.step(ok=ok)
+            else:
+                opt_v.step()
     return (v_loss.detach(),)
 
 
@@ -729,6 +851,7 @@ mdp.reward, mdp.termination, mdp.obs = torch.compile(mdp.reward), torch.compile(
 motion.goal = torch.compile(motion.goal)
 env = TrackingSim(sim_cfg, args.num_envs, robot, motion, mdp, dev, gamma=args.gamma, fail_reset=args.fail_reset,
                   div_k=args.div_k, div_tau=args.div_tau)
+CKPT_AT = {int(x) for x in args.ckpt_at.split(",") if x}
 PROFILE = os.environ.get("PM_PROFILE") == "1"  # time the physics substep and the phases of an iteration
 PROF_T = {"collect": 0.0, "wm": 0.0, "pi": 0.0, "n": 0}
 if PROFILE:
@@ -744,6 +867,24 @@ if PROFILE:
           f"(write_data_to_sim + sim.step + scene.update)", flush=True)
 if INIT_BINS is not None:  # --resume: the checkpoint's reset-sampler statistics (episodes already running keep their start)
     env.bin_G.copy_(INIT_BINS["bin_G"]), env.bin_fail.copy_(INIT_BINS["bin_fail"]), env.bin_w_avg.copy_(INIT_BINS["bin_w_avg"])
+ALLOC = None
+if args.reset_alloc != "none" or args.start_alloc != "none":
+    from partymimic.mdp import MAX_STEP_REWARD
+    from partymimic.spot import Cover
+
+    ALLOC = Cover(motion, dev, motion.names, prior=args.motion_prior, m=args.cover_m, cap=args.cover_cap,
+                  maint=args.cover_maint, decay=args.cover_decay, win=args.cover_win, start=args.cover_start,
+                  use_prior=bool(args.cover_prior), seed=args.seed, n_clusters=args.cover_clusters,
+                  seg=args.alloc_seg, r_max=MAX_STEP_REWARD, floor_bins=env.div_p)
+    top = ALLOC.prior.argsort(descending=True)[:5].tolist()
+    env.alloc, env.alloc_lambda = ALLOC, (args.alloc_lambda if args.reset_alloc == "lp" else 0.0)
+    env.alloc_last = bool(args.alloc_last)
+    print(f"allocation: {ALLOC.U} clusters of {ALLOC.G} groups (segments of <= {args.alloc_seg} bins), feasible share "
+          f"{ALLOC.feasible_share:.3f}, {ALLOC.n_missing} clips without prior; top {args.cover_m} at <= {args.cover_cap:.0%}, "
+          f"keep {args.cover_maint} x peak; resets {args.reset_alloc} (lambda {env.alloc_lambda}), starts "
+          f"{args.start_alloc}; best prior: " + "; ".join(ALLOC.unit_names[u] for u in top), flush=True)  # fmt: skip
+    if RESUME_CTRL is not None and "alloc" in RESUME_CTRL:
+        ALLOC.load_state_dict(RESUME_CTRL["alloc"])
 buffer = ReplayBuffer(args.buffer_steps, args.num_envs, dev, J, layout.dim)
 obs_hist = torch.zeros(args.num_envs, Hh, mdp.obs_dim, device=dev)
 
@@ -776,6 +917,8 @@ def _collect_core():
     CG["f"].copy_(env.f), CG["ep_step"].copy_(env.ep_step), CG["a_prev"].copy_(env.a_prev)
     env.f, env.ep_step, env.a_prev = CG["f"], CG["ep_step"], CG["a_prev"]
     core = {"done": out["done"], "term": out["term"], "f": out["f"], "r_mean": out["r"].mean() / 0.1}
+    if ALLOC is not None:
+        ALLOC.observe(out["f"], out["r"], out["term"])
     out = env.step_tail_masked(out)  # writes f, ep_step, a_prev in place
     n = out["n_done"]
     nan = torch.full((), float("nan"), device=dev)
@@ -953,6 +1096,14 @@ def learner_namespace():
     L = dict(globals())
     L.update(pi=pi_l, Q0=Q0.to(ldev), wm=copy.deepcopy(wm).to(ldev), buffer=buffer_l, motion=motion_l, mdp=mdp_l, kin=kin_l,
              normalize_xi=_to_device(layout, ldev).normalize, dev=ldev)  # fmt: skip
+    if args.start_alloc == "lp":
+        # start_weight reads these three tensors. Keep the static lookup on the learner
+        # and update its two evolving shares in the message that carries the replay rows.
+        sampler = copy.copy(ALLOC)
+        sampler.frame_group = ALLOC.frame_group.to(ldev)
+        sampler.mixed = ALLOC.mixed.to(ldev)
+        sampler.v = ALLOC.v.to(ldev)
+        L["ALLOC"] = sampler
     for name in LEARNER_FNS:
         f = globals()[name]
         inner = getattr(f, "__wrapped__", None)  # @torch.no_grad()
@@ -976,6 +1127,10 @@ class Pipe:
         a_t = list(wm.parameters()) + list(wm.buffers()) + list(pi.buffers())
         self.a_src, self.a_dst = a_t, list(wm_l.parameters()) + list(wm_l.buffers()) + list(pi_l.buffers())
         self.a_wire = wire_dtypes(wm, list(wm.parameters())) + [t.dtype for t in a_t[len(list(wm.parameters())):]]
+        if args.start_alloc == "lp":
+            self.a_src.extend((ALLOC.mixed, ALLOC.v))
+            self.a_dst.extend((L["ALLOC"].mixed, L["ALLOC"].v))
+            self.a_wire.extend((ALLOC.mixed.dtype, ALLOC.v.dtype))
         self.p_src, self.p_dst = list(pi_l.parameters()), list(pi.parameters())
         self.p_wire = wire_dtypes(pi_l, self.p_src)
         self.to_l, self.to_a = Link(dev, ldev), Link(ldev, dev)
@@ -1042,11 +1197,16 @@ if args.pipeline:
     PIPE.sync_actor(args.warmup_steps)
 log_path = os.path.join(args.log_dir, "train_log.csv")
 log_f = open(log_path, "a")
-if os.path.getsize(log_path) == 0:
+if start_it == 0:
     log_f.write("iteration,wall_h,sim_steps,wm_loss,wm_err8,pi_loss,v_loss,imag_rew,pi_gradnorm,imag_survival,sim_rew,ep_len,ep_ret_norm,term_frac,it_per_s,lr"
-                ",pi_lr,pi_mult,nonfinite\n")  # fmt: skip
+                ",pi_lr,pi_mult,nonfinite" + (",wm_skip,v_skip" if args.wm_guard > 0 or args.v_guard > 0 else "")
+                + (",v_sat" if args.v_clip > 0 else "")
+                + (",al_ent,al_top1,al_n_on,al_n_cool,al_noise" if ALLOC is not None else "") + "\n")  # fmt: skip
     log_f.flush()
 LOG_EXTRA = "pi_lr" in open(log_path).readline()  # lr = base LR; pi_lr = policy LR (x pi_mult)
+LOG_SKIP = "wm_skip" in open(log_path).readline()
+LOG_VSAT = "v_sat" in open(log_path).readline()
+LOG_ALLOC = "al_ent" in open(log_path).readline()
 # periodic checkpoints hold only the deployed policy (what the evaluators read) and are written by one background writer
 # (a failed write is re-raised in the training loop or at the end, at most 2 queued); last.pt is written at the end
 CKPT_POOL, CKPT_PENDING = ThreadPoolExecutor(max_workers=1), []
@@ -1076,6 +1236,8 @@ if RESUME_CTRL is not None:
 
 
 for it in range(start_it, args.iterations):
+    if it == args.gc_den_ref_it:
+        GC_REF_ON.zero_()
     lr = lr_at(it)
     pi_mult = args.pi_lr_mult  # --lr_decay_ret: ramps to 1 after the trigger
     if DECAY_AT[0] is not None:
@@ -1086,6 +1248,8 @@ for it in range(start_it, args.iterations):
                 gparam["lr"].fill_(lr * (pi_mult if o is opt_pi else 1.0))
             else:
                 gparam["lr"] = lr * (pi_mult if o is opt_pi else 1.0)
+    if ALLOC is not None:
+        ALLOC.tick(it)
     if HOOK and it in HOOK_AT:
         exec(open(HOOK).read(), globals())
     step_acc += 1.0 / args.utd
@@ -1148,6 +1312,13 @@ for it in range(start_it, args.iterations):
         row = [it + 1, wall_h, sim_steps, mean(agg["wm"]), mean(agg["wm8"]), mean(agg["pi"]), mean(agg["v"]), mean(agg["ir"]),
                mean(agg["gn"]), mean(agg["surv"]), mean(stats["r"]), mean_nn(stats["ep_len"]), mean_nn(stats["ep_ret"]), term_frac, ips, lr]  # fmt: skip
         extra = [lr * pi_mult, float(pi_mult), int(NONFINITE)] if LOG_EXTRA else []
+        if LOG_SKIP:
+            extra += [int(WM_SKIP), int(V_SKIP)]
+        if LOG_VSAT:
+            extra += [float(V_SAT)]
+        AL_DIAG = ALLOC.diag() if ALLOC is not None else None
+        if LOG_ALLOC:
+            extra += [AL_DIAG[k] for k in ("ent", "top1", "n_learn", "n_stuck", "noise")]
         log_f.write(",".join(f"{x:.6g}" if isinstance(x, float) else str(x) for x in row + extra) + "\n")
         deadline = args.lr_decay_by > 0 and it + 1 >= args.lr_decay_by
         if args.lr_decay_ret > 0 and DECAY_AT[0] is None and (row[12] >= args.lr_decay_ret or deadline):
@@ -1158,8 +1329,12 @@ for it in range(start_it, args.iterations):
         print(f"it {it + 1} | {wall_h:.3f} h | wm {row[3]:.4f} e8 {row[4]:.4f} | pi {row[5]:.3f} v {row[6]:.4f} imag_r {row[7]:.3f} surv {row[9]:.3f} "
               f"| sim_r {row[10]:.3f} ep_len {row[11]:.1f} ep_ret {row[12]:.3f} term {term_frac:.2f} | {ips:.2f} it/s"
               + (" | G>V {:.2f} sil {:.4f}".format(*SIL_DIAG.tolist()) if args.sil > 0 else "")
-              + (" | gcons err {:.3f} cos {:.3f}".format(*GC_DIAG.tolist()) if GC_ON else "")
-              + (" | kp_aux rms {:.4f}".format(*KP_DIAG.tolist()) if args.kp_aux > 0 else ""), flush=True)  # fmt: skip
+              + (" | gcons err {:.3f} cos {:.3f} den {:.3g}".format(*GC_DIAG.tolist()) if GC_ON else "")
+              + (" | kp_aux rms {:.4f}".format(*KP_DIAG.tolist()) if args.kp_aux > 0 else "")
+              + (" | alloc ent {ent:.2f} top {top1:.2f} on {n_learn} cooled {n_stuck}".format(**AL_DIAG) if AL_DIAG is not None else "")
+              + (f" | v_sat {float(V_SAT):.3f}" if args.v_clip > 0 else "")
+              + (f" | skipped wm {int(WM_SKIP)} v {int(V_SKIP)}" if args.wm_guard > 0 or args.v_guard > 0 else ""), flush=True)  # fmt: skip
+        WM_SKIP.zero_(), V_SKIP.zero_()
         stats = {k: [] for k in stats}
         agg = {k: [] for k in agg}
     wall = time.time() - t_start
@@ -1168,26 +1343,29 @@ for it in range(start_it, args.iterations):
     if timed:
         next_ckpt_s += args.ckpt_minutes * 60
     final_ck = it + 1 == args.iterations or out_of_time
-    if not final_ck and ((it + 1) % args.ckpt_every == 0 or timed):
+    if not final_ck and ((it + 1) % args.ckpt_every == 0 or timed or it + 1 in CKPT_AT):
         sd = pi_avg.module.state_dict() if pi_avg is not None else pi_l.state_dict()
         small = {"pi": {k: v.detach().to("cpu", copy=True) for k, v in sd.items()}, "iteration": it + 1,
                  "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
-                 "robot_control": ROBOT_CONTROL, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
+                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
         ckpt_wait()
         CKPT_PENDING.append(CKPT_POOL.submit(_save_atomic, small, path))
     elif (it + 1) % args.ckpt_every == 0 or it + 1 == args.iterations or timed or out_of_time:
-        ck = {"wm": wm.state_dict(), "pi": pi_avg.module.state_dict() if pi_avg is not None else pi_l.state_dict(), "pi_live": pi_l.state_dict(), "critic": critic.state_dict(), "opt_wm": opt_wm.state_dict(),
+        ck = {"wm": wm.state_dict(), "pi": pi_avg.module.state_dict() if pi_avg is not None else pi_l.state_dict(), "pi_live": pi_l.state_dict(), "critic": critic.state_dict(),
+              "opt_wm": opt_wm.state_dict(),
               "opt_pi": opt_pi.state_dict(), "opt_v": opt_v.state_dict(), "iteration": it + 1,
               "wall_time": time.time() - t_start, "sim_steps": sim_steps, "args": vars(args),
               "pi_avg": pi_avg.state_dict() if pi_avg is not None else None,
-              "robot_control": ROBOT_CONTROL, "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
+              "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")}  # fmt: skip
         ck["ctrl"] = {"decay_at": DECAY_AT[0],
                       "env_bins": {"bin_G": env.bin_G.cpu(), "bin_fail": env.bin_fail.cpu(), "bin_w_avg": env.bin_w_avg.cpu()}}  # fmt: skip
+        if ALLOC is not None:
+            ck["ctrl"]["alloc"] = ALLOC.state_dict()
         last = os.path.join(args.log_dir, "last.pt")
         torch.save(ck, last + ".tmp")
         os.replace(last + ".tmp", last)
-        small = {k: ck[k] for k in ("pi", "pi_live", "wm", "iteration", "wall_time", "sim_steps", "args", "saved_at", "robot_control")}
+        small = {k: ck[k] for k in ("pi", "pi_live", "wm", "iteration", "wall_time", "sim_steps", "args", "saved_at")}
         path = os.path.join(args.log_dir, f"ckpt_{it + 1:06d}.pt")
         torch.save(small, path + ".tmp")
         os.replace(path + ".tmp", path)

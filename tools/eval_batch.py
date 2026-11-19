@@ -41,14 +41,15 @@ robot = get_robot(args.robot or _run_args.get("robot", "g1"))
 ROBOT_CONTROL = control_snapshot(robot)
 kin = Kinematics(robot, dev)
 motion = MotionLib.from_source(robot, kin, dev, motion_dir=_run_args.get("motion_dir"), motion_file=_run_args.get("motion_file"))  # the run's own motion set
-motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
+motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies, _run_args.get("obs_err", "none"))
 check_pruned(_run_args, nets_only=True, what=args.run_dir)
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 
 
 def load_policy(ck):
-    validate_control(ck, ROBOT_CONTROL)
+    if "robot_control" in ck:
+        validate_control(ck, ROBOT_CONTROL, inference=True)
     a_ = ck["args"]
     widths = lambda key: tuple(int(x) for x in a_.get(key, "2048,1024,512,256").split(","))  # noqa: E731
     pi = Policy(mdp.obs_dim, motion.goal_dim(a_["goal_frames"]), robot.num_joints, hist=a_["hist"],

@@ -46,12 +46,18 @@ def control_snapshot(robot: RobotSpec) -> dict | None:
         'flat_foot_height': robot.flat_foot_height, 'asset_sha256': files,
         'friction_randomization': {'geoms': robot.dr.friction_geoms,
                                    'range': list(robot.dr.friction_range),
-                                   'ground_selection': 'world_welded_bodies'},
+                                   'ground_selection': 'world_body'},
     }
 
 
-def validate_control(checkpoint: dict, current: dict | None) -> None:
+def validate_control(checkpoint: dict, current: dict | None, *, inference: bool = False) -> None:
     saved = checkpoint.get('robot_control')
+    # The previous trainer selected welded ground bodies during randomization.
+    # A deterministic evaluation or export can still use that policy's identical robot controls.
+    if inference and saved and current:
+        dr = saved.get('friction_randomization', {})
+        if dr.get('ground_selection') == 'world_welded_bodies':
+            saved = {**saved, 'friction_randomization': {**dr, 'ground_selection': 'world_body'}}
     if saved != current:
         if saved is None:
             raise ValueError('Checkpoint lacks robot_control; cannot verify EVT dynamics')

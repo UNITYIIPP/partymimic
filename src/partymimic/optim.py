@@ -43,15 +43,23 @@ class FlatAdam:
         self.gflat.zero_()  # the gradients stay views of gflat
 
     @torch.no_grad()
-    def step(self):
+    def step(self, ok: torch.Tensor | None = None):
+        """``ok``: optional 0-dim bool device tensor; where it is false the step is skipped (parameters, moments and
+        the step count unchanged) without a host read."""
         b1, b2 = self.betas
-        self.n_step.add_(1)
-        self.m.lerp_(self.gflat, 1 - b1)
-        self.v.mul_(b2).addcmul_(self.gflat, self.gflat, value=1 - b2)
-        bc1 = 1 - torch.pow(b1, self.n_step)
-        bc2 = 1 - torch.pow(b2, self.n_step)
+        if ok is None:
+            self.n_step.add_(1)
+            self.m.lerp_(self.gflat, 1 - b1)
+            self.v.mul_(b2).addcmul_(self.gflat, self.gflat, value=1 - b2)
+        else:
+            self.n_step.add_(ok.float())
+            self.m.copy_(torch.where(ok, self.m.lerp(self.gflat, 1 - b1), self.m))
+            self.v.copy_(torch.where(ok, self.v * b2 + (1 - b2) * self.gflat * self.gflat, self.v))
+        bc1 = 1 - torch.pow(b1, self.n_step.clamp(min=1))
+        bc2 = 1 - torch.pow(b2, self.n_step.clamp(min=1))
         denom = (self.v.sqrt() / bc2.sqrt()).add_(self.eps)
-        self.flat.sub_(self.m / denom * (self.param_groups[0]["lr"] / bc1))
+        d = self.m / denom * (self.param_groups[0]["lr"] / bc1)
+        self.flat.sub_(d if ok is None else torch.where(ok, d, 0.0))
 
     def state_dict(self):
         return {"flat_adam": True, "m": self.m, "v": self.v, "step": self.n_step}
@@ -69,22 +77,23 @@ class MuonAdam:
     tensor learning rate (torch.optim.Muon reads a tensor lr on the host, so a captured step would freeze it)."""
 
     def __init__(self, model: nn.Module, mlps: list[nn.Module], lr: float, betas=(0.9, 0.95), fused: bool = True,
-                 capturable: bool = False, io: bool = False, flat_adam: bool = False):  # fmt: skip
+                 capturable: bool = False, io: bool = False, flat_adam: bool = False, weight_decay: float = 0.0):  # fmt: skip
         """``io``: the first and last Linear of each MLP on Muon too (Adam only on the vectors). ``flat_adam``: the Adam
-        part as FlatAdam (capturable; no gated step)."""
+        part as FlatAdam (capturable; no gated step). ``weight_decay``: decoupled decay on the Muon group
+        (torch.optim.Muon default is 0.1)."""
         hidden = {id(l.weight) for m in mlps for l in (_linears(m) if io else _linears(m)[1:-1])}
         muon = [p for p in model.parameters() if id(p) in hidden]
         adam = [p for p in model.parameters() if id(p) not in hidden and p.requires_grad]
         self.capturable = capturable
         if capturable:
             dev = muon[0].device
-            self.muon = torch.optim.Muon(muon, lr=torch.tensor(float(lr), device=dev), weight_decay=0.0, adjust_lr_fn="match_rms_adamw")
+            self.muon = torch.optim.Muon(muon, lr=torch.tensor(float(lr), device=dev), weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw")
             if flat_adam:
                 self.adam = FlatAdam(adam, lr, betas=betas)
             else:
                 self.adam = torch.optim.Adam(adam, lr=torch.tensor(float(lr), device=dev), betas=betas, fused=True, capturable=True)
         else:
-            self.muon = torch.optim.Muon(muon, lr=lr, weight_decay=0.0, adjust_lr_fn="match_rms_adamw")
+            self.muon = torch.optim.Muon(muon, lr=lr, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw")
             self.adam = torch.optim.Adam(adam, lr=lr, betas=betas, fused=fused)
 
     @property
@@ -100,7 +109,6 @@ class MuonAdam:
         from torch.optim._muon import _adjust_lr, _zeropower_via_newtonschulz
 
         for g in self.muon.param_groups:
-            assert g["weight_decay"] == 0.0
             for p in g["params"]:
                 if p.grad is None:
                     continue
@@ -116,6 +124,9 @@ class MuonAdam:
                 update = _zeropower_via_newtonschulz(update, g["ns_coefficients"], g["ns_steps"], g["eps"])
                 ratio = _adjust_lr(1.0, g["adjust_lr_fn"], p.shape)
                 d = update.to(p.dtype) * (g["lr"] * -ratio)  # fp32 product (a bf16 update x 0-dim tensor stays bf16)
+                if g["weight_decay"] != 0.0:  # decoupled decay as torch.optim.Muon: p *= 1 - lr * wd, then the update
+                    shrink = 1 - g["lr"] * g["weight_decay"]
+                    p.mul_(shrink if ok is None else torch.where(ok, shrink, 1.0))
                 p.add_(d if ok is None else torch.where(ok, d, 0.0))
 
     @torch.no_grad()
@@ -134,6 +145,9 @@ class MuonAdam:
                 self.muon.step()
                 for t, k in zip(ps + bufs(), keep):
                     t.copy_(torch.where(ok, t, k))
+            if isinstance(self.adam, FlatAdam):
+                self.adam.step(ok=ok)
+                return
             assert self.adam.defaults["fused"], "a gated step needs the fused Adam (--fused_adam)"
             self.adam.found_inf = (~ok).float()  # the fused kernel skips the step and undoes the step count
             try:

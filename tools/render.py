@@ -7,6 +7,7 @@ Usage: MUJOCO_GL=egl python tools/render.py traj.npz out.mp4 --robot g1 --clips 
 import argparse
 import os
 import re
+import shutil
 import subprocess
 
 os.environ.setdefault("MUJOCO_GL", "egl")
@@ -23,6 +24,9 @@ def two_robot_xml(robot: RobotSpec, clean: bool = False, ghost_alpha: float = 0.
     xml = re.sub(r'meshdir="([^"]*)"', lambda m: 'meshdir="' + os.path.join(mjcf_dir, m.group(1)) + '/"', xml)
     body = xml[xml.index(f'<body name="{robot.tracked_bodies[0]}"') : xml.index("</worldbody>")]
     ghost = re.sub(r' name="([^"]+)"', r' name="ref_\1"', body)
+    if robot.name in ("evt", "evt_nominal"):
+        # EVT uses group 3 for colliders and duplicate meshes, group 1 for the visible shell.
+        ghost = re.sub(r'<geom\b[^>]*\bgroup="3"[^>]*/>', '', ghost)
     ghost_rgb = "0.12 0.47 0.98" if white else "0.35 0.65 1.0"
     ghost = re.sub(r'rgba="[^"]*"', f'rgba="{ghost_rgb} {ghost_alpha}"', ghost)
     ghost = re.sub(r' (contype|conaffinity|group)="[^"]*"', "", ghost)
@@ -91,8 +95,13 @@ def main():
     cam.distance, cam.azimuth, cam.elevation = a.distance, a.azimuth, a.elevation
     font = ImageFont.load_default(size=22) if hasattr(ImageFont, "load_default") else None
     clips = a.clips or names
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        ffmpeg = get_ffmpeg_exe()
     ff = subprocess.Popen(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{a.width}x{a.height}", "-r", str(a.fps),
+        [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{a.width}x{a.height}", "-r", str(a.fps),
          "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", a.out],
         stdin=subprocess.PIPE,
     )  # fmt: skip
@@ -144,7 +153,8 @@ def main():
                 draw.text(xy, txt, fill=(20, 20, 20), font=font)
             ff.stdin.write(np.asarray(img).tobytes())
     ff.stdin.close()
-    ff.wait()
+    if ff.wait():
+        raise SystemExit("ffmpeg could not write the video")
     print("wrote", a.out)
 
 

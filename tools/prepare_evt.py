@@ -43,8 +43,12 @@ def match_foot_lengths(world: ET.Element, reference_urdf: Path) -> None:
             geom.set('size', f'{radius:.9g} {half_segment:.9g}')
 
 
-def prepare(source: Path, output: Path, reference_urdf: Path | None = None) -> None:
-    config_path = REPO / 'assets/evt/config.json'
+def prepare(source: Path, output: Path, reference_urdf: Path | None = None, *, robot: str = 'evt') -> None:
+    if robot not in ('evt', 'evt_nominal'):
+        raise ValueError(f'Unknown EVT configuration: {robot}')
+    if robot == 'evt_nominal' and output.resolve().is_relative_to((REPO / 'data/evt').resolve()):
+        raise ValueError('evt_nominal must use a separate output directory; data/evt belongs to the original EVT')
+    config_path = REPO / 'assets' / robot / 'config.json'
     config = json.loads(config_path.read_text())
     xml = source / 'urdf/evt2_simple.xml'
     root = ET.parse(xml).getroot()
@@ -85,6 +89,16 @@ def prepare(source: Path, output: Path, reference_urdf: Path | None = None) -> N
             geom.set('priority', '1' if foot else '0')
             geom.set('friction', '0.6 0.005 0.0001' if foot else '1 0.005 0.0001')
     match_foot_lengths(world, reference_urdf)
+    if robot == 'evt':
+        geoms = {g.get('name'): g for g in world.iter('geom')}
+        # Fit the primitives to the EVT shell, in the waist and pelvis link frames.
+        torso = geoms['waist_pitch_link_collision_0_collision']
+        torso.attrib.pop('pos', None)
+        torso.attrib.pop('quat', None)
+        torso.attrib.update(type='capsule', size='0.125', fromto='0 0 0.115 0 0 0.225')
+        pelvis = geoms['pelvis_collision_0_collision']
+        pelvis.attrib.pop('quat', None)
+        pelvis.attrib.update(type='sphere', size='0.106', pos='0 0 -0.038')
     output.mkdir(parents=True, exist_ok=True)
     (output / 'meshes').mkdir(exist_ok=True)
     for mesh in root.findall('./asset/mesh'):
@@ -99,6 +113,8 @@ def prepare(source: Path, output: Path, reference_urdf: Path | None = None) -> N
                   'foot_length_reference': str(reference_urdf.resolve()),
                   'foot_length_reference_sha256': digest(reference_urdf),
                   'collision_recipe': 'urdf_foot_lengths_g1_full_collision_v1'}
+    if robot == 'evt':
+        provenance['body_collision_recipe'] = 'evt_torso_capsule_pelvis_sphere_v1'
     (output / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     import mujoco
     model = mujoco.MjModel.from_xml_path(str(output / 'evt.xml'))
@@ -111,7 +127,8 @@ def prepare(source: Path, output: Path, reference_urdf: Path | None = None) -> N
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--source', type=Path, required=True)
-    ap.add_argument('--output', type=Path, default=REPO / 'data/evt')
+    ap.add_argument('--robot', choices=('evt', 'evt_nominal'), default='evt')
+    ap.add_argument('--output', type=Path, help='default: data/<robot>')
     ap.add_argument('--reference-urdf', type=Path, help='foot cylinder lengths; default: <source>/urdf/tiangong2dex.urdf')
     a = ap.parse_args()
-    prepare(a.source, a.output, a.reference_urdf)
+    prepare(a.source, a.output or REPO / 'data' / a.robot, a.reference_urdf, robot=a.robot)

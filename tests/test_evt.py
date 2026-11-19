@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from partymimic.control import control_snapshot, validate_control
-from partymimic.dr import XiLayout, ground_geom_ids
+from partymimic.dr import XiLayout
 from partymimic.evt.motion_io import load_archive
 from partymimic.kinematics import Kinematics
 from partymimic.mirror import Mirror
@@ -115,6 +115,40 @@ class RobotTests(unittest.TestCase):
         self.assertEqual(lib.kp, [0, 7, 10, 13, 3, 6])
         self.assertTrue(bool(torch.isfinite(lib.goal(torch.tensor([0]), 10)).all()))
 
+    def test_archive_and_directory_feed_the_same_sampler(self):
+        # Same motion as compact_v1 and per-clip official NPZ, including a terminal-only bin.
+        names = self.robot.joint_names
+        lens = [51, 104]
+        n = sum(lens)
+        rng = np.random.default_rng(7)
+        q = rng.normal(0, .1, (n, len(names))).astype(np.float16)
+        pos = rng.normal(0, .1, (n, 3)).astype(np.float32)
+        rest = np.zeros((n, 68), np.float16)
+        rest[:, 0], rest[:, 4:33] = 1, q
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / 'packed.npz'
+            directory = Path(tmp) / 'directory'
+            directory.mkdir()
+            starts = [0, lens[0]]
+            np.savez(archive, storage='compact_v1', robot='evt', fps=50., joint_names=names, root_pos=pos,
+                     rest=rest, starts=starts, lengths=lens, names=['a', 'b'])
+            for name, start, length in zip(['a', 'b'], starts, lens):
+                sl = slice(start, start + length)
+                np.savez(directory / (name + '.npz'), body_pos_w=pos[sl, None], body_quat_w=rest[sl, None, :4],
+                         joint_pos=q[sl], fps=np.array([50.]))
+            a = MotionLib.from_source(self.robot, self.kin, 'cpu', motion_file=str(archive))
+            b = MotionLib.from_dir(str(directory), self.robot, self.kin, 'cpu')
+        self.assertEqual(a.names, b.names)
+        for k in ('clip_len', 'clip_start', 'clip_end', 'bin_clip', 'bin_start', 'frame_bin', 'root_p',
+                  'root_R', 'root_v', 'q', 'qd', 'body_p'):
+            torch.testing.assert_close(getattr(a, k), getattr(b, k), rtol=0, atol=0)
+        for lib in (a, b):
+            lib.set_interface('joint', self.robot.tracked_bodies, 'kp')
+        self.assertEqual(a.kp, [0, 7, 10, 13, 3, 6])
+        torch.testing.assert_close(a.bin_features(), b.bin_features(), rtol=0, atol=0)
+        for seed in (1, 7):
+            torch.testing.assert_close(a.bin_clusters(3, seed=seed), b.bin_clusters(3, seed=seed))
+
     def test_effective_controls_and_checkpoint_guard(self):
         s = control_snapshot(self.robot)
         params = json.loads((REPO / 'assets/evt/config.json').read_text())['joints']
@@ -129,6 +163,21 @@ class RobotTests(unittest.TestCase):
             validate_control({'robot_control': s}, changed)
         with self.assertRaisesRegex(ValueError, 'lacks'):
             validate_control({}, s)
+
+    def test_torso_and_pelvis_colliders(self):
+        model = mujoco.MjModel.from_xml_path(self.robot.mjcf_path)
+        torso = model.geom('waist_pitch_link_collision_0_collision').id
+        pelvis = model.geom('pelvis_collision_0_collision').id
+        self.assertEqual(model.geom_type[torso], mujoco.mjtGeom.mjGEOM_CAPSULE)
+        self.assertEqual(model.geom_type[pelvis], mujoco.mjtGeom.mjGEOM_SPHERE)
+        np.testing.assert_allclose(model.geom_size[torso, :2], [.125, .055])
+        np.testing.assert_allclose(model.geom_pos[torso], [0, 0, .17])
+        np.testing.assert_allclose(model.geom_size[pelvis, 0], .106)
+        np.testing.assert_allclose(model.geom_pos[pelvis], [0, 0, -.038])
+        data = mujoco.MjData(model)
+        data.qpos[7:] = self.robot.default_joint_pos_list()
+        mujoco.mj_forward(model, data)
+        self.assertFalse(any({torso, pelvis}.intersection(contact.geom) for contact in data.contact))
 
     def test_foot_capsule_lengths_and_support_extent(self):
         model = mujoco.MjModel.from_xml_path(self.robot.mjcf_path)
@@ -156,16 +205,14 @@ class RobotTests(unittest.TestCase):
         from mjlab.scene import Scene
         from partymimic.env import make_scene_cfg
         model = Scene(make_scene_cfg(self.robot, 1), device='cpu').compile()
-        ground = ground_geom_ids(model)
         terrain = model.geom('terrain').id
-        self.assertIn(terrain, ground)
         self.assertEqual(model.geom_condim[terrain], 3)
         self.assertEqual(model.geom_priority[terrain], 0)
         colliders = [i for i in range(model.ngeom) if model.geom(i).name.startswith('robot/')
                      and re.fullmatch(self.robot.dr.friction_geoms, model.geom(i).name.removeprefix('robot/'))]
         self.assertEqual(len(colliders), 39)
         model.geom_friction[colliders, 0] = .45
-        model.geom_friction[ground, 0] = .3
+        model.geom_friction[terrain, 0] = .3  # controlled surface for this geometry test
         for name in ('foot_left_strip_center_collision', 'left_tcp_link_collision_0_collision',
                      'knee_pitch_l_link_collision_0_collision', 'pelvis_collision_0_collision'):
             gid = model.geom('robot/' + name).id

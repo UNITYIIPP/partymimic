@@ -1,8 +1,9 @@
 #!/bin/bash
 # Training libraries and test sets of the results, from the public sources (README, "Data"):
 #   tools/data/build_library.sh g1          G1 library data/motions/g1_mix (LAFAN1 + BONES-SEED subset + KungfuAthlete
-#                                           train split) and the Extreme test set data/testsets/extreme_g1; its steps
-#                                           alone: lafan, bones, kungfu (also the Extreme set), mix
+#                                           train split + our kneeling / crawling clips + XtremeMotion) and the Extreme
+#                                           test set data/testsets/extreme_g1; its steps alone: lafan, bones, kungfu
+#                                           (also the Extreme set), xtreme, mix
 #   HHT=<human-humanoid-tools> tools/data/build_library.sh rp1
 #                                           after g1: G1 -> RP1 R2R of both, -> data/motions/rp1_mix, data/testsets/extreme_rp1
 #   HHT=... SIM2REAL=<sim2real> tools/data/build_library.sh rp1_md
@@ -52,15 +53,25 @@ kungfu() {
   log "Extreme: $(wc -l < $TS/extreme_g1/motion-list.txt) clips"
 }
 
+xtreme() {
+  log "XtremeMotion (OmniXtreme's curated subset, 13 MB)"
+  mkdir -p $RAW/xtreme
+  curl -sSL -o $RAW/xtreme/xtreme_motion.npz \
+    "https://drive.usercontent.google.com/download?id=1-LXEmUfW80BXYQ0tAZx341PzY8u14Z9Q&export=download&confirm=t"
+  echo "efc8f7fa86df93f00c371d3e9d7d4183d4c72e8dfd08056bd4ddea69fd6d4155  $RAW/xtreme/xtreme_motion.npz" | sha256sum -c
+  $PY $T/xtreme.py $RAW/xtreme/xtreme_motion.npz $M/g1/xtreme
+}
+
 mix() {
   rm -rf $M/g1_mix && mkdir -p $M/g1_mix
-  for d in lafan bones kungfu; do
+  for d in lafan bones kungfu xtreme; do
     if [ -d $M/g1/$d ]; then ln -s "$PWD/$M/g1/$d"/*.npz $M/g1_mix/; fi
   done
+  ln -s "$PWD"/assets/motions/kneel_crawl/g1/*.npz $M/g1_mix/
   log "G1 library $M/g1_mix: $(ls $M/g1_mix | wc -l) clips"
 }
 
-g1() { lafan; bones; kungfu; mix; }
+g1() { lafan; bones; kungfu; xtreme; mix; }
 
 rp1() {
   : "${HHT:?set HHT to a human-humanoid-tools checkout}"
@@ -69,6 +80,7 @@ rp1() {
   $PY $T/rp1_data.py g1csv $M/g1_mix $R/g1csv --shards "$P"
   retarget $R/g1csv $R/rp1csv 50
   $PY $T/rp1_data.py npz $R/rp1csv $M/rp1_mix
+  cp assets/motions/kneel_crawl/rp1/*.npz $M/rp1_mix/  # the RP1 retargets of the page's library
   $PY $T/rp1_floor.py $R/floor_library.json $M/rp1_mix
 
   log "RP1 Extreme set"

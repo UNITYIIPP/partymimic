@@ -5,7 +5,8 @@ goal features of the next K frames), so any motion file (*.csv) the robot's load
 
 Inputs:  obs_history (1, H, O)  raw observations, oldest first, layout of partymimic.mdp.MDP.obs:
                                 q - q0, qd, root angular velocity (root frame), projected gravity,
-                                previous action, reference-relative root orientation (6D)
+                                previous action, reference-relative root orientation (6D),
+                                and MDP.kp_err for checkpoints with --obs_err kp
          time_step   (1, 1)     reference frame at 50 Hz from the start of the motion (float)
 Outputs: actions (1, J)         joint targets are q0 + action_scale * actions
          joint_pos, joint_vel (1, J), body_pos_w, body_quat_w (wxyz), body_lin_vel_w, body_ang_vel_w
@@ -82,25 +83,33 @@ def main():
     ck = torch.load(a.ckpt, map_location=dev, weights_only=False)
     robot = get_robot(a.robot or ck["args"].get("robot", "g1"))
     snapshot = control_snapshot(robot)
-    validate_control(ck, snapshot)
-    if ck["args"].get("interface", "joint") != "joint":
-        raise SystemExit("--interface sparse5: use tools/export_deploy_onnx.py (its observation needs the keypoint errors)")
+    if "robot_control" in ck:
+        validate_control(ck, snapshot, inference=True)
+    interface = ck["args"].get("interface", "joint")
+    obs_err = ck["args"].get("obs_err", "none")
+    if interface != "joint" or obs_err not in ("none", "kp"):
+        raise SystemExit("Single-motion export supports the joint interface with --obs_err none or kp")
     K, Hh = ck["args"]["goal_frames"], ck["args"]["hist"]
     motion = MotionLib.from_single(a.motion, robot, Kinematics(robot, dev), dev, a.clip)
+    motion.set_interface(interface, robot.tracked_bodies, obs_err)
+    observation_dim = obs_dim(robot.num_joints, interface, obs_err)
     networks.AMP_DTYPE = None  # fp32 graph (training ran the MLPs under bf16 autocast)
     widths = lambda key: tuple(int(x) for x in ck["args"].get(key, "2048,1024,512,256").split(","))  # noqa: E731
-    pi = Policy(obs_dim(robot.num_joints), motion.goal_dim(K), robot.num_joints, hist=Hh, enc_hidden=widths("enc_hidden"),
+    pi = Policy(observation_dim, motion.goal_dim(K), robot.num_joints, hist=Hh, enc_hidden=widths("enc_hidden"),
                 dec_hidden=widths("dec_hidden"), **policy_kwargs(ck["args"], robot))  # fmt: skip
     pi.load_state_dict(ck["pi"])
     model = PolicyWithMotion(pi, motion, K).eval()
 
-    obs = torch.zeros(1, Hh, obs_dim(robot.num_joints))
+    obs = torch.zeros(1, Hh, observation_dim)
     t = torch.zeros(1, 1)
     torch.onnx.export(model, (obs, t), a.out, input_names=["obs_history", "time_step"], output_names=OUTPUTS,
                       opset_version=18, dynamo=False)  # fmt: skip
 
     kp, kd = pd_gains(robot)
     fmt = lambda xs: ",".join(f"{float(x):.6g}" for x in xs)  # noqa: E731
+    observation_names = "joint_pos,joint_vel,base_ang_vel,projected_gravity,actions,motion_anchor_ori_b"
+    if obs_err == "kp":
+        observation_names += ",keypoint_error"
     meta = {
         "run_path": os.path.abspath(a.ckpt),
         "motion": motion.names[0],
@@ -114,7 +123,8 @@ def main():
         "default_joint_pos": fmt(robot.default_joint_pos_list()),
         "action_scale": fmt(robot.action_scale_list()),
         "command_names": "motion",
-        "observation_names": "joint_pos,joint_vel,base_ang_vel,projected_gravity,actions,motion_anchor_ori_b",
+        "observation_names": observation_names,
+        "obs_err": obs_err,
         "observation_history": str(Hh),
         "goal_frames": str(K),
         "control_dt": str(CONTROL_DT),
@@ -134,7 +144,9 @@ def main():
     except ImportError:
         print("onnxruntime not installed: skipped the ONNX vs torch check")
         return
-    sess = ort.InferenceSession(a.out, providers=["CPUExecutionProvider"])
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = torch.get_num_threads()
+    sess = ort.InferenceSession(a.out, sess_options=session_options, providers=["CPUExecutionProvider"])
     err = 0.0
     with torch.no_grad():
         for f in torch.randint(0, motion.num_frames, (64,)).tolist():

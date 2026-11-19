@@ -18,19 +18,15 @@ class Mirror:
     def __init__(self, robot: RobotSpec, xi_slices: dict, device: str):
         names = list(robot.joint_names)
         perm, sign = [], []
-        for i, n in enumerate(names):
+        for n in names:
             partner = n.replace("left_", "@").replace("right_", "left_").replace("@", "right_")
-            perm.append(robot.mirror_permutation[i] if robot.mirror_permutation is not None else names.index(partner))
+            perm.append(names.index(partner))
             sign.append(-1.0 if any(f"_{t}_" in n for t in _FLIP_TYPES) else 1.0)
-        self.perm = torch.tensor(perm, device=device)
+        self.perm = torch.tensor(robot.mirror_permutation or perm, device=device)
         self.sign = torch.tensor(robot.mirror_sign or sign, device=device)
-        if sorted(perm) != list(range(len(names))) or any(perm[perm[i]] != i for i in range(len(names))):
-            raise ValueError("Joint mirror must be an involutive permutation")
-        if not torch.equal(self.sign * self.sign[self.perm], torch.ones_like(self.sign)):
-            raise ValueError("Joint mirror signs must cancel after two reflections")
         self.M = torch.diag(torch.tensor([1.0, -1.0, 1.0], device=device))
         self.xi_slices = xi_slices
-        unknown = set(xi_slices) - {"friction", "joint_offset", "com"}
+        unknown = set(xi_slices) - {"friction", "joint_offset", "com", "payload"}
         assert not unknown, f"mirror of sim-context entries {unknown} not defined"
 
     def joints(self, x: torch.Tensor) -> torch.Tensor:
@@ -47,4 +43,6 @@ class Mirror:
         out[..., sl] = self.joints(xi[..., sl])
         c = self.xi_slices["com"]
         out[..., c.start + 1] = -xi[..., c.start + 1]  # lateral COM offset
+        if "payload" in self.xi_slices:  # left / right wrist
+            out[..., self.xi_slices["payload"]] = xi[..., self.xi_slices["payload"]].flip(-1)
         return out

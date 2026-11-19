@@ -410,10 +410,10 @@ def policy_kwargs(a_: dict, robot) -> dict:
     if a_.get("ref_enc", "mlp") != "mlp":
         kw.update(ref_enc=a_["ref_enc"], goal_frames=a_["goal_frames"], xattn_dim=a_.get("xattn_dim", 128),
                   xattn_heads=a_.get("xattn_heads", 4))
-    if a_.get("interface", "joint") != "joint":
+    if a_.get("interface", "joint") != "joint" or a_.get("obs_err", "none") != "none":
         from .mdp import obs_err_dim
 
-        kw["obs_err"] = obs_err_dim(a_["interface"])
+        kw["obs_err"] = obs_err_dim(a_.get("interface", "joint"), a_.get("obs_err", "none"))
     if a_.get("kp_skip", False):
         kw["kp_skip"] = (robot.action_scale_list(), tuple(int(x) for x in a_["kp_hidden"].split(",")))
     if a_.get("kp_aux", 0.0) > 0:

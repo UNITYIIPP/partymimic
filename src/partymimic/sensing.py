@@ -82,7 +82,7 @@ class SensingCfg:
         return self.delay_hold_prob is not None or self.imu is not None or self.joint_vel_filter is not None
 
 
-def obs_noise(cfg: SensingCfg, J: int, interface: str = "joint") -> torch.Tensor:
+def obs_noise(cfg: SensingCfg, J: int, interface: str = "joint", obs_err: str = "none") -> torch.Tensor:
     parts = [
         torch.full((J,), cfg.noise_joint_pos),
         torch.full((J,), cfg.noise_joint_vel),
@@ -91,7 +91,7 @@ def obs_noise(cfg: SensingCfg, J: int, interface: str = "joint") -> torch.Tensor
         torch.zeros(J),
         torch.full((6,), cfg.noise_ref_ori),
     ]
-    if interface == "sparse5":  # mdp.MDP.kp_err: 4 positions, 4 + 1 orientations
+    if interface == "sparse5" or obs_err == "kp":  # mdp.MDP.kp_err: 4 positions, 4 + 1 orientations
         parts += [torch.full((12,), cfg.noise_kp_pos), torch.full((15,), cfg.noise_kp_ori)]
     return torch.cat(parts)
 
@@ -231,7 +231,7 @@ class ObsPipeline:
         g_b = -R_att[..., 2, :]
         rel = mat_to_6d(R_att.transpose(-1, -2) @ self.mdp.motion.root_R[f])
         o = (q - self.mdp.default_q - dq0, qd_obs, ang_vel, g_b, a_prev, rel)
-        if self.mdp.interface == "sparse5":
+        if self.mdp.interface == "sparse5" or self.mdp.obs_err == "kp":
             o += (self.mdp.kp_err(R_att, q - dq0, f),)
         return torch.cat(o, -1)
 

@@ -62,6 +62,12 @@ class RobotSpec:
     """Assets hashed in the control snapshot; empty keeps legacy checkpoint compatibility."""
 
     @property
+    def wrists(self) -> tuple[str, ...]:
+        if self.sparse_bodies:
+            return self.sparse_bodies[1:3]
+        return tuple(n for n in self.tracked_bodies if "_wrist_" in n)
+
+    @property
     def num_joints(self) -> int:
         return len(self.joint_names)
 

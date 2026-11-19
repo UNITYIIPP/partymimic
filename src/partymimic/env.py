@@ -87,7 +87,7 @@ def make_sim(robot: RobotSpec) -> SimulationCfg:
 
 def _bin_ema_w(stat: torch.Tensor, bins: torch.Tensor, x: torch.Tensor, wt: torch.Tensor, old: float) -> torch.Tensor:
     """_bin_ema over the samples with weight wt = 1 (the others weight 0): fixed size, no host-side selection."""
-    sums = torch.zeros_like(stat).index_add_(0, bins, x * wt)
+    sums = torch.zeros_like(stat).index_add_(0, bins, torch.where(wt > 0, x, 0.0))  # NaN * 0 would still be NaN
     cnt = torch.zeros_like(stat).index_add_(0, bins, wt)
     return torch.where(cnt > 0, old * stat + (1 - old) * sums / cnt.clamp(min=1), stat)
 
@@ -160,6 +160,10 @@ class TrackingSim:
         self.bin_w_avg = torch.full((motion.num_bins,), 1.0 / motion.num_bins, device=dev)
         # InstantTrack: share of resets sent one bin before recent failure points (per-bin termination rate)
         self.fail_reset = fail_reset
+        # train.py --reset_alloc lp: an alloc.Allocator's share (alloc_lambda) is mixed into the reset distribution; with
+        # alloc set but alloc_lambda 0 it only records the reset shares (--start_alloc)
+        self.alloc, self.alloc_lambda = None, 0.0
+        self.alloc_last = False  # True: the adaptive share is mixed in last (over the release distribution + failures)
         # per-bin statistics average the episodes of a bin that end in the same step first (as supermimic_vibed's
         # update_bin_returns; index_put_ with duplicate indices would keep an arbitrary one)
         self.bin_fail = torch.zeros(motion.num_bins, device=dev)
@@ -204,16 +208,26 @@ class TrackingSim:
             self.bin_w_avg.mul_(0.999).add_(0.001 * soft)
         else:
             self.bin_w_avg.copy_(torch.where(gate, self.bin_w_avg * 0.999 + 0.001 * soft, self.bin_w_avg))
-        probs = (0.5 / m.num_bins if self.div_p is None else 0.5 * self.div_p) + 0.4 * soft + 0.1 * self.bin_w_avg / self.bin_w_avg.sum()
+        floor = 1.0 / m.num_bins if self.div_p is None else self.div_p
+        if self.alloc is not None and self.alloc_lambda > 0 and not self.alloc_last:
+            probs = (1 - self.alloc_lambda) * floor + self.alloc_lambda * self.alloc.bin_probs()
+        else:
+            probs = 0.5 * floor + 0.4 * soft + 0.1 * self.bin_w_avg / self.bin_w_avg.sum()
         if self.fail_reset > 0:
             fail = torch.zeros_like(self.bin_fail).index_add_(0, self.bin_prev, self.bin_fail)
             fail = fail / fail.sum().clamp(min=1e-6)
             probs = (1 - self.fail_reset) * probs + self.fail_reset * torch.where(fail.sum() > 0, fail, probs)
+        if self.alloc is not None and self.alloc_lambda > 0 and self.alloc_last:
+            probs = (1 - self.alloc_lambda) * probs + self.alloc_lambda * self.alloc.bin_probs()
+        if self.alloc is not None:
+            self.alloc.record_mixed(probs)
         bins = torch.multinomial(probs, n, replacement=True)
         start = m.bin_start[bins]
-        end = torch.minimum(start + 50, m.clip_end[m.bin_clip[bins]])  # keep >= 1 step before the clip end
+        clip_end = m.clip_end[m.bin_clip[bins]]
+        end = torch.minimum(start + 50, clip_end)  # keep >= 1 step before the clip end
         f = start + (torch.rand(n, device=self.device) * (end - start).float()).long()
-        return f, bins
+        # a clip's last bin can hold only its last frame (start == clip_end)
+        return torch.minimum(f, clip_end - 1), bins
 
     def reset(self, env_ids: torch.Tensor, frames: torch.Tensor | None = None):
         if len(env_ids) == 0:
@@ -412,11 +426,17 @@ class TrackingSim:
         f1 = f + 1
         r, terms = self.mdp.reward(S1, f1, a, a_prev, terms=True)
         term = self.mdp.termination(S1, f1)
+        s, s1 = flatten_state(S), flatten_state(S1)
+        # a simulator blow-up (possible under extreme randomization) ends the episode and stays out of the statistics
+        bad = ~(torch.isfinite(s1).all(-1) & torch.isfinite(r)) | (s1.abs() > 1e3).any(-1) | (r.abs() > 1e2)
+        r = torch.where(bad, 0.0, r)
+        s1 = torch.where(bad.unsqueeze(-1), s, s1)
+        term = term | bad
         clip_end = self.motion.clip_end[self.motion.clip_id[f]]
         timeout = (f1 >= clip_end) | (ep_step + 1 >= self.max_episode_steps)
         done = term | timeout
         out = {
-            "s": flatten_state(S), "a": a.clone(), "a_prev": a_prev, "f": f, "s1": flatten_state(S1), "r": r,
+            "s": s, "a": a.clone(), "a_prev": a_prev, "f": f, "s1": s1, "r": r,
             "term": term, "done": done, "ep_step": ep_step, "xi": xi, "terms": terms, "cut": done,
         }  # fmt: skip
         if self.pipe.stateful:

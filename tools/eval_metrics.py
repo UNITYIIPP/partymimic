@@ -45,14 +45,15 @@ ROBOT_CONTROL = control_snapshot(robot)
 CONTACT_Z, FLAT_Z = robot.contact_height, robot.flat_foot_height
 kin = Kinematics(robot, dev)
 motion = MotionLib.from_source(robot, kin, dev, motion_dir=_run_args.get("motion_dir"), motion_file=_run_args.get("motion_file"))
-motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
+motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies, _run_args.get("obs_err", "none"))
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 FEET = [robot.tracked_bodies.index(b) for b in robot.feet]
 
 
 def load_policy(ck):
-    validate_control(ck, ROBOT_CONTROL)
+    if "robot_control" in ck:
+        validate_control(ck, ROBOT_CONTROL, inference=True)
     a_ = ck["args"]
     assert all(a_.get(k) == _run_args.get(k) for k in ("motion_file", "motion_dir")), "checkpoints need the same motion source"
     assert a_.get("interface", "joint") == motion.interface, "all checkpoints need the same --interface"

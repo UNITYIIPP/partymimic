@@ -93,7 +93,7 @@ kin = Kinematics(robot, dev)
 source = ({"motion_dir": args.motion_dir, "motion_file": args.motion_file} if args.motion_dir or args.motion_file else
           {"motion_dir": _run_args.get("motion_dir"), "motion_file": _run_args.get("motion_file")})
 motion = MotionLib.from_source(robot, kin, dev, **source)
-motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies)
+motion.set_interface(_run_args.get("interface", "joint"), robot.tracked_bodies, _run_args.get("obs_err", "none"))
 mdp = MDP(kin, motion, torch.tensor(robot.default_joint_pos_list(), device=dev), XiLayout(robot, dev).dim, robot.sensing)
 C = len(motion.names)
 N = C * args.repeats
@@ -102,7 +102,8 @@ clip_of = torch.arange(N, device=dev) % C
 
 @torch.no_grad()
 def evaluate(env: TrackingSim, ck: dict, record: str | None = None) -> dict:
-    validate_control(ck, ROBOT_CONTROL)
+    if "robot_control" in ck:
+        validate_control(ck, ROBOT_CONTROL, inference=True)
     a_ = ck["args"]
     K, Hh = a_["goal_frames"], a_["hist"]
     assert a_.get("interface", "joint") == motion.interface, "checkpoint and the run's args.json differ in --interface"
